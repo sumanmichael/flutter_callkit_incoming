@@ -38,6 +38,9 @@ class CallkitConnection(
     val callId: String,
     val bundle: Bundle,
 ) : Connection() {
+    private val historyScope = bundle.getString(PendingCallEvents.scopeExtra)
+    private val historyDirection = bundle.getString(PendingCallEvents.directionExtra, "inbound")
+    private val historyRemote = bundle.getString(CallkitConstants.EXTRA_CALLKIT_HANDLE, "")
 
     companion object {
         private const val TAG = "CallkitConnection"
@@ -84,24 +87,28 @@ class CallkitConnection(
 
     override fun onAnswer() {
         super.onAnswer()
+        recordHistory("accepted")
         Log.d(TAG, "onAnswer id=$callId")
         setActive()
     }
 
     override fun onReject() {
         super.onReject()
+        recordHistory("ended", "declined")
         Log.d(TAG, "onReject id=$callId")
         finishWithCause(DisconnectCause.REJECTED)
     }
 
     override fun onDisconnect() {
         super.onDisconnect()
+        recordHistory("ended")
         Log.d(TAG, "onDisconnect id=$callId")
         finishWithCause(DisconnectCause.LOCAL)
     }
 
     override fun onAbort() {
         super.onAbort()
+        recordHistory("ended", "failed")
         Log.d(TAG, "onAbort id=$callId")
         finishWithCause(DisconnectCause.UNKNOWN)
     }
@@ -134,6 +141,7 @@ class CallkitConnection(
 
     /** Mark the call as answered — user accepted via app notification. */
     fun markAccepted() {
+        recordHistory("accepted")
         Log.d(TAG, "markAccepted id=$callId")
         setActive()
     }
@@ -155,6 +163,7 @@ class CallkitConnection(
      * FGS for the lifetime of the connection.
      */
     fun markDeclined(context: Context) {
+        recordHistory("ended", "declined")
         Log.d(TAG, "markDeclined id=$callId")
         // Do not launch the app on decline. End the self-managed Telecom call
         // immediately so declining from the notification/lock screen leaves a
@@ -197,12 +206,14 @@ class CallkitConnection(
 
     /** Mark the call as terminated — call ended (either side hung up). */
     fun markEnded() {
+        recordHistory("ended")
         Log.d(TAG, "markEnded id=$callId")
         finishWithCause(DisconnectCause.LOCAL)
     }
 
     /** Mark the call as missed — timeout without answer. */
     fun markMissed() {
+        recordHistory("ended", "missed")
         Log.d(TAG, "markMissed id=$callId")
         finishWithCause(DisconnectCause.MISSED)
     }
@@ -219,5 +230,9 @@ class CallkitConnection(
         } catch (e: Exception) {
             Log.w(TAG, "destroy failed: ${e.message}")
         }
+    }
+
+    private fun recordHistory(kind: String, outcome: String? = null) {
+        PendingCallEvents.record(callId, historyScope, kind, historyDirection, historyRemote, outcome)
     }
 }

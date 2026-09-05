@@ -172,12 +172,12 @@ class CallkitIncomingBroadcastReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         val action = intent.action ?: return
         val data = intent.extras?.getBundle(CallkitConstants.EXTRA_CALLKIT_INCOMING_DATA) ?: return
-
         Log.d(TAG, action)
 
         when (action) {
             "${context.packageName}.${CallkitConstants.ACTION_CALL_INCOMING}" -> {
                 try {
+                    captureStart(context, data, "incoming", "inbound")
                     registerTelecomIncomingCall(context, data)
                     val incomingData = Data.fromBundle(data)
                     if (incomingData.isFullScreen) {
@@ -195,6 +195,7 @@ class CallkitIncomingBroadcastReceiver : BroadcastReceiver() {
 
             "${context.packageName}.${CallkitConstants.ACTION_CALL_START}" -> {
                 try {
+                    captureStart(context, data, "started", "outbound")
                     // start service and show ongoing call when call is accepted
                     CallkitNotificationService.startServiceWithAction(
                         context,
@@ -210,6 +211,7 @@ class CallkitIncomingBroadcastReceiver : BroadcastReceiver() {
 
             "${context.packageName}.${CallkitConstants.ACTION_CALL_ACCEPT}" -> {
                 try {
+                    captureFact(context, data, "accepted")
                     driveTelecomConnection(context, data, CallkitConstants.ACTION_CALL_ACCEPT)
                     FlutterCallkitIncomingPlugin.notifyEventCallbacks(CallkitEventCallback.CallEvent.ACCEPT, data)
                     // start service and show ongoing call when call is accepted
@@ -228,6 +230,7 @@ class CallkitIncomingBroadcastReceiver : BroadcastReceiver() {
 
             "${context.packageName}.${CallkitConstants.ACTION_CALL_DECLINE}" -> {
                 try {
+                    captureFact(context, data, "ended", "declined")
                     driveTelecomConnection(context, data, CallkitConstants.ACTION_CALL_DECLINE)
                     FlutterCallkitIncomingPlugin.notifyEventCallbacks(CallkitEventCallback.CallEvent.DECLINE, data)
                     // clear notification
@@ -241,6 +244,7 @@ class CallkitIncomingBroadcastReceiver : BroadcastReceiver() {
 
             "${context.packageName}.${CallkitConstants.ACTION_CALL_ENDED}" -> {
                 try {
+                    captureFact(context, data, "ended")
                     driveTelecomConnection(context, data, CallkitConstants.ACTION_CALL_ENDED)
                     FlutterCallkitIncomingPlugin.notifyEventCallbacks(CallkitEventCallback.CallEvent.END, data)
                     // clear notification and stop service
@@ -255,6 +259,7 @@ class CallkitIncomingBroadcastReceiver : BroadcastReceiver() {
 
             "${context.packageName}.${CallkitConstants.ACTION_CALL_TIMEOUT}" -> {
                 try {
+                    captureFact(context, data, "ended", "missed")
                     driveTelecomConnection(context, data, CallkitConstants.ACTION_CALL_TIMEOUT)
                     // clear notification and show miss notification
                     val notificationManager = getCallkitNotificationManager()
@@ -269,6 +274,7 @@ class CallkitIncomingBroadcastReceiver : BroadcastReceiver() {
 
             "${context.packageName}.${CallkitConstants.ACTION_CALL_CONNECTED}" -> {
                 try {
+                    captureFact(context, data, "connected")
                     // update notification on going connected
                     getCallkitNotificationManager()?.showOngoingCallNotification(data, true)
                     sendEventFlutter(CallkitConstants.ACTION_CALL_CONNECTED, data)
@@ -290,6 +296,34 @@ class CallkitIncomingBroadcastReceiver : BroadcastReceiver() {
                 }
             }
         }
+    }
+
+    private fun captureStart(context: Context, data: Bundle, kind: String, direction: String) {
+        val scope = data.getString(PendingCallEvents.scopeExtra)
+            ?: PendingCallEvents.scopeForStart()
+            ?: return
+        data.putString(PendingCallEvents.scopeExtra, scope)
+        data.putString(PendingCallEvents.directionExtra, direction)
+        PendingCallEvents.record(
+            context,
+            data.getString(CallkitConstants.EXTRA_CALLKIT_ID, ""),
+            scope,
+            kind,
+            direction,
+            data.getString(CallkitConstants.EXTRA_CALLKIT_HANDLE, ""),
+        )
+    }
+
+    private fun captureFact(context: Context, data: Bundle, kind: String, outcome: String? = null) {
+        PendingCallEvents.record(
+            context,
+            data.getString(CallkitConstants.EXTRA_CALLKIT_ID, ""),
+            data.getString(PendingCallEvents.scopeExtra),
+            kind,
+            data.getString(PendingCallEvents.directionExtra, "inbound"),
+            data.getString(CallkitConstants.EXTRA_CALLKIT_HANDLE, ""),
+            outcome,
+        )
     }
 
     private fun sendEventFlutter(event: String, data: Bundle) {

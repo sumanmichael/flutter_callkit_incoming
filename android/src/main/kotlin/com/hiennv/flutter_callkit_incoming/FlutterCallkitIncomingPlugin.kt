@@ -44,6 +44,7 @@ class FlutterCallkitIncomingPlugin : FlutterPlugin, MethodCallHandler, ActivityA
         }
 
         private val methodChannels = mutableMapOf<BinaryMessenger, MethodChannel>()
+        private val historyChannels = mutableMapOf<BinaryMessenger, MethodChannel>()
         private val eventChannels = mutableMapOf<BinaryMessenger, EventChannel>()
         private val eventHandlers = mutableMapOf<BinaryMessenger, EventCallbackHandler>()
         private val eventCallbacks = mutableListOf<WeakReference<CallkitEventCallback>>()
@@ -123,6 +124,7 @@ class FlutterCallkitIncomingPlugin : FlutterPlugin, MethodCallHandler, ActivityA
         }
 
         fun initSharedInstance(context: Context, binaryMessenger: BinaryMessenger) {
+            PendingCallEvents.initialize(context.applicationContext)
             if (!::instance.isInitialized) {
                 instance = FlutterCallkitIncomingPlugin()
             }
@@ -150,6 +152,10 @@ class FlutterCallkitIncomingPlugin : FlutterPlugin, MethodCallHandler, ActivityA
             val channel = MethodChannel(binaryMessenger, "flutter_callkit_incoming")
             methodChannels[binaryMessenger] = channel
             channel.setMethodCallHandler(instance)
+
+            val history = MethodChannel(binaryMessenger, "vspphone/history")
+            historyChannels[binaryMessenger] = history
+            history.setMethodCallHandler(PendingCallEvents::handle)
 
             val events = EventChannel(binaryMessenger, "flutter_callkit_incoming_events")
             eventChannels[binaryMessenger] = events
@@ -449,6 +455,7 @@ class FlutterCallkitIncomingPlugin : FlutterPlugin, MethodCallHandler, ActivityA
 
     override fun onDetachedFromEngine(binding: FlutterPlugin.FlutterPluginBinding) {
         methodChannels.remove(binding.binaryMessenger)?.setMethodCallHandler(null)
+        historyChannels.remove(binding.binaryMessenger)?.setMethodCallHandler(null)
         eventChannels.remove(binding.binaryMessenger)?.setStreamHandler(null)
         eventHandlers.remove(binding.binaryMessenger)
 

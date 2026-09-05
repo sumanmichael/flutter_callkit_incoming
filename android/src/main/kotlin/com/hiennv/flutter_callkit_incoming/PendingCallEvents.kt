@@ -1,0 +1,468 @@
+package com.hiennv.flutter_callkit_incoming
+
+import android.content.Context
+import android.os.Build
+import android.os.Handler
+import android.os.Looper
+import android.security.keystore.KeyGenParameterSpec
+import android.security.keystore.KeyProperties
+import android.util.AtomicFile
+import com.fasterxml.jackson.databind.JsonNode
+import com.fasterxml.jackson.databind.ObjectMapper
+import io.flutter.plugin.common.MethodCall
+import io.flutter.plugin.common.MethodChannel
+import java.io.File
+import java.security.KeyStore
+import java.security.SecureRandom
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+import java.util.TimeZone
+import java.util.UUID
+import java.util.concurrent.Executors
+import javax.crypto.Cipher
+import javax.crypto.KeyGenerator
+import javax.crypto.SecretKey
+import javax.crypto.spec.GCMParameterSpec
+
+internal class HistoryStoreException(val code: String) : RuntimeException(code)
+
+internal interface EventFile {
+    fun read(): ByteArray?
+    fun write(bytes: ByteArray)
+}
+
+private class AtomicEventFile(file: File) : EventFile {
+    private val file = AtomicFile(file)
+
+    override fun read(): ByteArray? =
+        if (!file.baseFile.exists()) null else file.openRead().use { it.readBytes() }
+
+    override fun write(bytes: ByteArray) {
+        val output = file.startWrite()
+        try {
+            output.write(bytes)
+            output.fd.sync()
+            file.finishWrite(output)
+        } catch (error: Exception) {
+            file.failWrite(output)
+            throw error
+        }
+    }
+}
+
+internal object PendingCallEventsCrypto {
+    private val aad = "vspphone-history-1".toByteArray(Charsets.US_ASCII)
+
+    fun encrypt(plain: ByteArray, key: SecretKey, nonce: ByteArray): ByteArray {
+        require(nonce.size == 12)
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+        cipher.init(Cipher.ENCRYPT_MODE, key, GCMParameterSpec(128, nonce))
+        cipher.updateAAD(aad)
+        return byteArrayOf(1) + nonce + cipher.doFinal(plain)
+    }
+
+    fun decrypt(bytes: ByteArray, key: SecretKey): ByteArray {
+        if (bytes.size < 30 || bytes[0].toInt() != 1) throw HistoryStoreException("history_corrupt")
+        return try {
+            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+            cipher.init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(128, bytes.copyOfRange(1, 13)))
+            cipher.updateAAD(aad)
+            cipher.doFinal(bytes.copyOfRange(13, bytes.size))
+        } catch (error: HistoryStoreException) {
+            throw error
+        } catch (error: Exception) {
+            throw HistoryStoreException("history_corrupt")
+        }
+    }
+}
+
+private data class StoredFact(val kind: String, val at: Long, val outcome: String?)
+private data class StoredCall(
+    val generation: String,
+    val callId: String,
+    val direction: String,
+    val remote: String,
+    val facts: MutableMap<String, StoredFact> = linkedMapOf(),
+)
+private data class PendingEvent(
+    val factClass: String,
+    var delivered: Boolean,
+    val value: Map<String, Any?>,
+)
+
+internal class PendingCallEventsStore(
+    private val file: EventFile,
+    private val key: SecretKey,
+    private val now: () -> Long = System::currentTimeMillis,
+    private val newId: () -> String = { UUID.randomUUID().toString() },
+    private val newNonce: () -> ByteArray = { ByteArray(12).also(SecureRandom()::nextBytes) },
+) {
+    private val mapper = ObjectMapper()
+    @Volatile private var currentScope: String? = null
+    private val tombstones = linkedMapOf<String, Long>()
+    private val calls = linkedMapOf<String, StoredCall>()
+    private val events = mutableListOf<PendingEvent>()
+
+    init {
+        file.read()?.let { load(it) }
+    }
+
+    fun setScope(generation: String) {
+        validateGeneration(generation)
+        prune()
+        if (tombstones.containsKey(generation)) throw HistoryStoreException("history_unknown_generation")
+        val oldScope = currentScope
+        currentScope = generation
+        try {
+            persist()
+        } catch (error: Exception) {
+            currentScope = oldScope
+            throw error
+        }
+    }
+
+    fun scopeForStart(): String? = currentScope?.takeUnless(tombstones::containsKey)
+
+    fun record(
+        callId: String,
+        originalScope: String?,
+        kind: String,
+        direction: String,
+        remote: String,
+        outcome: String? = null,
+        at: Long = now(),
+    ) {
+        if (callId.isEmpty() || kind !in kinds || direction !in directions || outcome !in outcomes) return
+        val existing = if (originalScope != null) {
+            calls[ledgerKey(originalScope, callId)]
+        } else {
+            calls.values.filter { it.callId == callId }.singleOrNull()
+        }
+        val generation = originalScope ?: existing?.generation ?: return
+        if (tombstones.containsKey(generation)) return
+        if (existing != null && existing.generation != generation) return
+        val call = existing ?: StoredCall(generation, callId, direction, remote).also {
+            calls[ledgerKey(generation, callId)] = it
+        }
+        val factClass = if (kind == "started" || kind == "incoming") "start" else if (kind == "ended") "terminal" else kind
+        val old = call.facts[factClass]
+        if (old != null) {
+            if (factClass == "terminal" || at >= old.at) return
+        }
+        val resolvedOutcome = if (kind == "ended" && outcome == null) {
+            if (call.facts.containsKey("connected")) "answered" else "unknown"
+        } else outcome
+        call.facts[factClass] = StoredFact(kind, at, resolvedOutcome)
+        val oldPending = events.filter {
+            it.value["generation"] == generation &&
+                it.value["call_key"] == callKey(callId) &&
+                it.factClass == factClass
+        }
+        events.removeAll(oldPending.filterNot { it.delivered }.toSet())
+        events += PendingEvent(factClass, false, event(call, kind, at, resolvedOutcome))
+        prune()
+        persist()
+    }
+
+    fun pending(generation: String): List<Map<String, Any?>> {
+        requireKnownGeneration(generation)
+        val selected = events.filter { it.value["generation"] == generation }
+        val newlyDelivered = selected.filterNot { it.delivered }
+        if (newlyDelivered.isNotEmpty()) {
+            newlyDelivered.forEach { it.delivered = true }
+            try {
+                persist()
+            } catch (error: Exception) {
+                newlyDelivered.forEach { it.delivered = false }
+                throw error
+            }
+        }
+        return selected.map { LinkedHashMap(it.value) }
+    }
+
+    fun ack(generation: String, eventIds: List<String>) {
+        requireKnownGeneration(generation)
+        val removed = events.filter {
+            it.value["generation"] == generation && it.value["event_id"] in eventIds
+        }
+        events.removeAll(removed.toSet())
+        try {
+            persist()
+        } catch (error: Exception) {
+            events.addAll(removed)
+            throw error
+        }
+    }
+
+    fun clear(generation: String) {
+        validateGeneration(generation)
+        val oldScope = currentScope
+        val oldTombstone = tombstones[generation]
+        val oldCalls = calls.filterValues { it.generation == generation }
+        val oldEvents = events.filter { it.value["generation"] == generation }
+        tombstones[generation] = now()
+        if (currentScope == generation) currentScope = null
+        calls.entries.removeAll { it.value.generation == generation }
+        events.removeAll(oldEvents.toSet())
+        try {
+            persist()
+        } catch (error: Exception) {
+            currentScope = oldScope
+            if (oldTombstone == null) tombstones.remove(generation) else tombstones[generation] = oldTombstone
+            calls.putAll(oldCalls)
+            events.addAll(oldEvents)
+            throw error
+        }
+    }
+
+    private fun event(call: StoredCall, kind: String, at: Long, outcome: String?): Map<String, Any?> = linkedMapOf(
+        "version" to 1,
+        "event_id" to newId(),
+        "generation" to call.generation,
+        "call_key" to callKey(call.callId),
+        "kind" to kind,
+        "direction" to call.direction,
+        "at" to formatTime(at),
+        "remote" to call.remote,
+        "sdk_id" to null,
+        "native_id" to call.callId,
+        "provider_leg_id" to null,
+        "provider_session_id" to null,
+        "android_call_control_id" to call.callId,
+        "outcome" to outcome,
+    )
+
+    private fun persist() {
+        val root = mapper.createObjectNode().put("version", 1)
+        currentScope?.let { root.put("current_scope", it) }
+        val tombstoneArray = root.putArray("tombstones")
+        tombstones.forEach { (generation, clearedAt) ->
+            tombstoneArray.addObject().put("generation", generation).put("cleared_at", clearedAt)
+        }
+        val callArray = root.putArray("calls")
+        calls.values.forEach { call ->
+            val node = callArray.addObject()
+                .put("generation", call.generation)
+                .put("call_id", call.callId)
+                .put("direction", call.direction)
+                .put("remote", call.remote)
+            val facts = node.putObject("facts")
+            call.facts.forEach { (name, fact) ->
+                val factNode = facts.putObject(name).put("kind", fact.kind).put("at", fact.at)
+                fact.outcome?.let { factNode.put("outcome", it) }
+            }
+        }
+        val pendingArray = root.putArray("pending")
+        events.forEach { pending ->
+            val node = pendingArray.addObject()
+                .put("fact_class", pending.factClass)
+                .put("delivered", pending.delivered)
+            node.set<JsonNode>("event", mapper.valueToTree(pending.value))
+        }
+        try {
+            file.write(PendingCallEventsCrypto.encrypt(mapper.writeValueAsBytes(root), key, newNonce()))
+        } catch (error: HistoryStoreException) {
+            throw error
+        } catch (_: Exception) {
+            throw HistoryStoreException("history_unavailable")
+        }
+    }
+
+    private fun load(bytes: ByteArray) {
+        val root = try {
+            mapper.readTree(PendingCallEventsCrypto.decrypt(bytes, key))
+        } catch (error: HistoryStoreException) {
+            throw error
+        } catch (error: Exception) {
+            throw HistoryStoreException("history_corrupt")
+        }
+        if (root.path("version").asInt(-1) != 1) throw HistoryStoreException("history_unknown_version")
+        currentScope = root.get("current_scope")?.takeUnless(JsonNode::isNull)?.asText()
+        try {
+            root.path("tombstones").forEach { tombstones[it.required("generation").asText()] = it.required("cleared_at").asLong() }
+            root.path("calls").forEach { node ->
+                val call = StoredCall(
+                    node.required("generation").asText(),
+                    node.required("call_id").asText(),
+                    node.required("direction").asText(),
+                    node.required("remote").asText(),
+                )
+                node.required("facts").fields().forEach { (name, fact) ->
+                    call.facts[name] = StoredFact(
+                        fact.required("kind").asText(),
+                        fact.required("at").asLong(),
+                        fact.get("outcome")?.takeUnless(JsonNode::isNull)?.asText(),
+                    )
+                }
+                calls[ledgerKey(call.generation, call.callId)] = call
+            }
+            root.path("pending").forEach { node ->
+                val event = node.required("event")
+                if (event.path("version").asInt(-1) != 1) throw HistoryStoreException("history_unknown_version")
+                validateEvent(event)
+                @Suppress("UNCHECKED_CAST")
+                val value = mapper.convertValue(event, LinkedHashMap::class.java) as Map<String, Any?>
+                val call = calls[ledgerKey(value["generation"] as String, value["native_id"] as String)]
+                    ?: throw HistoryStoreException("history_corrupt")
+                if (value["call_key"] != callKey(call.callId)) throw HistoryStoreException("history_corrupt")
+                events += PendingEvent(node.required("fact_class").asText(), node.path("delivered").asBoolean(false), value)
+            }
+        } catch (error: HistoryStoreException) {
+            throw error
+        } catch (error: Exception) {
+            throw HistoryStoreException("history_corrupt")
+        }
+        prune()
+    }
+
+    private fun prune() {
+        val cutoff = now() - retentionMillis
+        tombstones.entries.removeAll { it.value < cutoff }
+        while (tombstones.size > maxCalls) tombstones.remove(tombstones.entries.first().key)
+        val expiredCalls = calls.values.filter { call -> call.facts.values.maxOfOrNull { it.at }?.let { it < cutoff } ?: true }
+        expiredCalls.forEach { calls.remove(ledgerKey(it.generation, it.callId)) }
+        while (calls.size > maxCalls) calls.remove(calls.entries.first().key)
+        val retained = calls.values.map { it.generation to callKey(it.callId) }.toSet()
+        events.removeAll { (it.value["generation"] to it.value["call_key"]) !in retained }
+        while (events.size > maxEvents) events.removeAt(0)
+    }
+
+    private fun requireKnownGeneration(generation: String) {
+        validateGeneration(generation)
+        if (tombstones.containsKey(generation) ||
+            generation != currentScope && calls.values.none { it.generation == generation } && events.none { it.value["generation"] == generation }
+        ) throw HistoryStoreException("history_unknown_generation")
+    }
+
+    private fun validateGeneration(generation: String) {
+        if (generation.isBlank()) throw HistoryStoreException("history_invalid_arguments")
+    }
+
+    private fun validateEvent(event: JsonNode) {
+        val names = event.fieldNames().asSequence().toSet()
+        if (names != eventFields ||
+            !event.path("version").isInt ||
+            requiredEventStrings.any { !event.path(it).isTextual } ||
+            event.path("kind").asText() !in kinds ||
+            event.path("direction").asText() !in directions ||
+            nullableEventStrings.any { !event.path(it).isNull && !event.path(it).isTextual } ||
+            (!event.path("outcome").isNull && event.path("outcome").asText() !in outcomes)
+        ) throw HistoryStoreException("history_corrupt")
+    }
+
+    private fun formatTime(milliseconds: Long): String = requireNotNull(timeFormat.get()).format(Date(milliseconds))
+
+    companion object {
+        private const val maxCalls = 500
+        private const val maxEvents = maxCalls * 5
+        private const val retentionMillis = 7L * 24 * 60 * 60 * 1000
+        private val kinds = setOf("started", "incoming", "accepted", "connected", "ended")
+        private val directions = setOf("inbound", "outbound")
+        private val outcomes = setOf(null, "answered", "declined", "missed", "failed", "interrupted", "unknown")
+        private fun callKey(callId: String) = "android:$callId"
+        private fun ledgerKey(generation: String, callId: String) = "$generation\u0000$callId"
+        private val requiredEventStrings = setOf("event_id", "generation", "call_key", "kind", "direction", "at", "remote", "native_id", "android_call_control_id")
+        private val nullableEventStrings = setOf("sdk_id", "provider_leg_id", "provider_session_id", "outcome")
+        private val eventFields = requiredEventStrings + nullableEventStrings + "version"
+        private val timeFormat = object : ThreadLocal<SimpleDateFormat>() {
+            override fun initialValue() = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.US).apply {
+                timeZone = TimeZone.getTimeZone("UTC")
+            }
+        }
+    }
+}
+
+internal object PendingCallEvents {
+    const val scopeExtra = "com.hiennv.flutter_callkit_incoming.HISTORY_SCOPE"
+    const val directionExtra = "com.hiennv.flutter_callkit_incoming.HISTORY_DIRECTION"
+    private val executor = Executors.newSingleThreadExecutor()
+    @Volatile private var store: PendingCallEventsStore? = null
+    @Volatile private var failureCode: String? = null
+
+    @Synchronized
+    fun initialize(context: Context) {
+        if (store != null || failureCode != null) return
+        try {
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) throw HistoryStoreException("history_unavailable")
+            store = PendingCallEventsStore(
+                AtomicEventFile(File(context.applicationContext.noBackupFilesDir, "pending_call_events")),
+                historyKey(),
+            )
+        } catch (error: HistoryStoreException) {
+            failureCode = error.code
+        } catch (_: Exception) {
+            failureCode = "history_unavailable"
+        }
+    }
+
+    fun scopeForStart(): String? = store?.scopeForStart()
+
+    fun record(callId: String, scope: String?, kind: String, direction: String, remote: String, outcome: String? = null) {
+        record(null, callId, scope, kind, direction, remote, outcome)
+    }
+
+    fun record(context: Context?, callId: String, scope: String?, kind: String, direction: String, remote: String, outcome: String? = null) {
+        val observedAt = System.currentTimeMillis()
+        executor.execute {
+            try {
+                if (store == null && context != null) initialize(context.applicationContext)
+                store?.record(callId, scope, kind, direction, remote, outcome, observedAt)
+            } catch (_: Exception) {
+                // Calls must continue when protected history storage is unavailable.
+            }
+        }
+    }
+
+    fun handle(call: MethodCall, result: MethodChannel.Result) {
+        executor.execute {
+            try {
+                val active = store ?: throw HistoryStoreException(failureCode ?: "history_unavailable")
+                val args = call.arguments as? Map<*, *> ?: throw HistoryStoreException("history_invalid_arguments")
+                val generation = args["generation"] as? String ?: throw HistoryStoreException("history_invalid_arguments")
+                val value: Any? = when (call.method) {
+                    "setScope" -> {
+                        active.setScope(generation)
+                        null
+                    }
+                    "pending" -> active.pending(generation)
+                    "ack" -> {
+                        val ids = (args["event_ids"] as? List<*>)?.map {
+                            it as? String ?: throw HistoryStoreException("history_invalid_arguments")
+                        } ?: throw HistoryStoreException("history_invalid_arguments")
+                        active.ack(generation, ids)
+                        null
+                    }
+                    "clear" -> {
+                        active.clear(generation)
+                        null
+                    }
+                    else -> throw HistoryStoreException("history_invalid_arguments")
+                }
+                reply { result.success(value) }
+            } catch (error: HistoryStoreException) {
+                reply { result.error(error.code, error.code, null) }
+            } catch (_: Exception) {
+                reply { result.error("history_unavailable", "history_unavailable", null) }
+            }
+        }
+    }
+
+    private fun reply(block: () -> Unit) = Handler(Looper.getMainLooper()).post(block)
+
+    private fun historyKey(): SecretKey {
+        val keyStore = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
+        (keyStore.getKey("vspphone_pending_history", null) as? SecretKey)?.let { return it }
+        val generator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore")
+        generator.init(
+            KeyGenParameterSpec.Builder(
+                "vspphone_pending_history",
+                KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT,
+            ).setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+                .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+                .setRandomizedEncryptionRequired(true)
+                .build(),
+        )
+        return generator.generateKey()
+    }
+}
