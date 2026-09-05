@@ -300,11 +300,14 @@ class CallkitIncomingBroadcastReceiver : BroadcastReceiver() {
 
     private fun captureStart(context: Context, data: Bundle, kind: String, direction: String) {
         val scope = data.getString(PendingCallEvents.scopeExtra) ?: PendingCallEvents.scopeForStart()
+        val sessionKey = data.getString(PendingCallEvents.sessionExtra) ?: PendingCallEvents.newSessionKey()
         scope?.let { data.putString(PendingCallEvents.scopeExtra, it) }
+        data.putString(PendingCallEvents.sessionExtra, sessionKey)
         data.putString(PendingCallEvents.directionExtra, direction)
         PendingCallEvents.recordStart(
             context,
             data.getString(CallkitConstants.EXTRA_CALLKIT_ID, ""),
+            sessionKey,
             scope,
             kind,
             direction,
@@ -321,6 +324,7 @@ class CallkitIncomingBroadcastReceiver : BroadcastReceiver() {
             data.getString(PendingCallEvents.directionExtra, "inbound"),
             data.getString(CallkitConstants.EXTRA_CALLKIT_HANDLE, ""),
             outcome,
+            data.getString(PendingCallEvents.sessionExtra),
         )
     }
 

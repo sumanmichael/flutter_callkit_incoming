@@ -118,6 +118,30 @@ class PendingCallEventsTest {
     }
 
     @Test
+    fun coldLoadedScopeStaysBoundToSessionAfterScopeChangeAndReusedCallId() {
+        val file = TestEventFile(temporaryFolder.newFile())
+        store(file).setScope("scope-a")
+        val cold = store(file)
+        cold.recordStart("call-shared", "session-a", null, "incoming", "inbound", "+12025550119")
+        cold.setScope("scope-b")
+        cold.recordStart("call-shared", "session-b", null, "incoming", "inbound", "+12025550120")
+
+        val restarted = store(file)
+        restarted.record(
+            "call-shared",
+            null,
+            "ended",
+            "inbound",
+            "+12025550119",
+            "missed",
+            sessionKey = "session-a",
+        )
+
+        assertEquals(listOf("incoming", "ended"), restarted.pending("scope-a").map { it["kind"] })
+        assertEquals(listOf("incoming"), restarted.pending("scope-b").map { it["kind"] })
+    }
+
+    @Test
     fun rejectsCorruptCiphertextWrongKeyAndUnknownVersions() {
         val corruptFile = TestEventFile(temporaryFolder.newFile()).apply {
             write(byteArrayOf(1, 2, 3))

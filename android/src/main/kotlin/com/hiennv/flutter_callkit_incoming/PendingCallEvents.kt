@@ -81,6 +81,7 @@ private data class StoredFact(val kind: String, val at: Long, val outcome: Strin
 private data class StoredCall(
     val generation: String,
     val callId: String,
+    val sessionKey: String,
     val direction: String,
     val remote: String?,
     val facts: MutableMap<String, StoredFact> = linkedMapOf(),
@@ -124,6 +125,26 @@ internal class PendingCallEventsStore(
 
     fun scopeForStart(): String? = currentScope?.takeUnless(tombstones::containsKey)
 
+    fun recordStart(
+        callId: String,
+        sessionKey: String,
+        originalScope: String?,
+        kind: String,
+        direction: String,
+        remote: String,
+        at: Long = now(),
+    ) {
+        record(
+            callId,
+            originalScope ?: scopeForStart(),
+            kind,
+            direction,
+            remote,
+            at = at,
+            sessionKey = sessionKey,
+        )
+    }
+
     fun record(
         callId: String,
         originalScope: String?,
@@ -132,17 +153,24 @@ internal class PendingCallEventsStore(
         remote: String,
         outcome: String? = null,
         at: Long = now(),
+        sessionKey: String? = null,
     ) {
         if (callId.isEmpty() || kind !in kinds || direction !in directions || outcome !in outcomes) return
-        val existing = if (originalScope != null) {
-            calls[ledgerKey(originalScope, callId)]
-        } else {
-            calls.values.filter { it.callId == callId }.singleOrNull()
+        val existing = when {
+            sessionKey != null -> calls.values.singleOrNull { it.sessionKey == sessionKey }
+            originalScope != null -> calls[ledgerKey(originalScope, callId)]
+            else -> calls.values.filter { it.callId == callId }.singleOrNull()
         }
         val generation = originalScope ?: existing?.generation ?: return
         if (tombstones.containsKey(generation)) return
         if (existing != null && existing.generation != generation) return
-        val call = existing ?: StoredCall(generation, callId, direction, remote.takeIf { it.isNotBlank() }).also {
+        val call = existing ?: StoredCall(
+            generation,
+            callId,
+            sessionKey ?: "legacy:$generation:$callId",
+            direction,
+            remote.takeIf { it.isNotBlank() },
+        ).also {
             calls[ledgerKey(generation, callId)] = it
         }
         val factClass = if (kind == "started" || kind == "incoming") "start" else if (kind == "ended") "terminal" else kind
@@ -245,6 +273,7 @@ internal class PendingCallEventsStore(
             val node = callArray.addObject()
                 .put("generation", call.generation)
                 .put("call_id", call.callId)
+                .put("session_key", call.sessionKey)
                 .put("direction", call.direction)
                 .put("remote", call.remote)
             val facts = node.putObject("facts")
@@ -285,6 +314,8 @@ internal class PendingCallEventsStore(
                 val call = StoredCall(
                     node.required("generation").asText(),
                     node.required("call_id").asText(),
+                    node.get("session_key")?.takeUnless(JsonNode::isNull)?.asText()
+                        ?: "legacy:${node.required("generation").asText()}:${node.required("call_id").asText()}",
                     node.required("direction").asText(),
                     node.required("remote").takeUnless(JsonNode::isNull)?.asText(),
                 )
@@ -378,6 +409,7 @@ internal class PendingCallEventsStore(
 internal object PendingCallEvents {
     const val scopeExtra = "com.hiennv.flutter_callkit_incoming.HISTORY_SCOPE"
     const val directionExtra = "com.hiennv.flutter_callkit_incoming.HISTORY_DIRECTION"
+    const val sessionExtra = "com.hiennv.flutter_callkit_incoming.HISTORY_SESSION"
     private val executor = Executors.newSingleThreadExecutor()
     @Volatile private var store: PendingCallEventsStore? = null
     @Volatile private var failureCode: String? = null
@@ -404,18 +436,20 @@ internal object PendingCallEvents {
 
     fun scopeForStart(): String? = store?.scopeForStart()
 
-    fun record(callId: String, scope: String?, kind: String, direction: String, remote: String, outcome: String? = null) {
-        record(null, callId, scope, kind, direction, remote, outcome)
+    fun newSessionKey(): String = UUID.randomUUID().toString()
+
+    fun record(callId: String, scope: String?, kind: String, direction: String, remote: String, outcome: String? = null, sessionKey: String? = null) {
+        record(null, callId, scope, kind, direction, remote, outcome, sessionKey)
     }
 
-    fun recordStart(context: Context, callId: String, scope: String?, kind: String, direction: String, remote: String) {
+    fun recordStart(context: Context, callId: String, sessionKey: String, scope: String?, kind: String, direction: String, remote: String) {
         val observedAt = System.currentTimeMillis()
         val applicationContext = context.applicationContext
         executor.execute {
             try {
                 initializeNow(applicationContext)
                 store?.let { active ->
-                    active.record(callId, scope ?: active.scopeForStart(), kind, direction, remote, at = observedAt)
+                    active.recordStart(callId, sessionKey, scope, kind, direction, remote, observedAt)
                 }
             } catch (_: Exception) {
                 // Calls must continue when protected history storage is unavailable.
@@ -423,12 +457,12 @@ internal object PendingCallEvents {
         }
     }
 
-    fun record(context: Context?, callId: String, scope: String?, kind: String, direction: String, remote: String, outcome: String? = null) {
+    fun record(context: Context?, callId: String, scope: String?, kind: String, direction: String, remote: String, outcome: String? = null, sessionKey: String? = null) {
         val observedAt = System.currentTimeMillis()
         executor.execute {
             try {
                 if (store == null && context != null) initializeNow(context.applicationContext)
-                store?.record(callId, scope, kind, direction, remote, outcome, observedAt)
+                store?.record(callId, scope, kind, direction, remote, outcome, observedAt, sessionKey)
             } catch (_: Exception) {
                 // Calls must continue when protected history storage is unavailable.
             }

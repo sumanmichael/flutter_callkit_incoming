@@ -39,6 +39,7 @@ class CallkitConnection(
     val bundle: Bundle,
 ) : Connection() {
     private val historyScope = bundle.getString(PendingCallEvents.scopeExtra)
+    private val historySession = bundle.getString(PendingCallEvents.sessionExtra)
     private val historyDirection = bundle.getString(PendingCallEvents.directionExtra, "inbound")
     private val historyRemote = bundle.getString(CallkitConstants.EXTRA_CALLKIT_HANDLE, "")
 
@@ -233,6 +234,6 @@ class CallkitConnection(
     }
 
     private fun recordHistory(kind: String, outcome: String? = null) {
-        PendingCallEvents.record(callId, historyScope, kind, historyDirection, historyRemote, outcome)
+        PendingCallEvents.record(callId, historyScope, kind, historyDirection, historyRemote, outcome, historySession)
     }
 }
