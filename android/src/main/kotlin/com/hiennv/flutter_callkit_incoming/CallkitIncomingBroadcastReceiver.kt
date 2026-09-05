@@ -299,12 +299,10 @@ class CallkitIncomingBroadcastReceiver : BroadcastReceiver() {
     }
 
     private fun captureStart(context: Context, data: Bundle, kind: String, direction: String) {
-        val scope = data.getString(PendingCallEvents.scopeExtra)
-            ?: PendingCallEvents.scopeForStart()
-            ?: return
-        data.putString(PendingCallEvents.scopeExtra, scope)
+        val scope = data.getString(PendingCallEvents.scopeExtra) ?: PendingCallEvents.scopeForStart()
+        scope?.let { data.putString(PendingCallEvents.scopeExtra, it) }
         data.putString(PendingCallEvents.directionExtra, direction)
-        PendingCallEvents.record(
+        PendingCallEvents.recordStart(
             context,
             data.getString(CallkitConstants.EXTRA_CALLKIT_ID, ""),
             scope,

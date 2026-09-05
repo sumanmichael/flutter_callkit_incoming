@@ -82,7 +82,7 @@ private data class StoredCall(
     val generation: String,
     val callId: String,
     val direction: String,
-    val remote: String,
+    val remote: String?,
     val facts: MutableMap<String, StoredFact> = linkedMapOf(),
 )
 private data class PendingEvent(
@@ -142,7 +142,7 @@ internal class PendingCallEventsStore(
         val generation = originalScope ?: existing?.generation ?: return
         if (tombstones.containsKey(generation)) return
         if (existing != null && existing.generation != generation) return
-        val call = existing ?: StoredCall(generation, callId, direction, remote).also {
+        val call = existing ?: StoredCall(generation, callId, direction, remote.takeIf { it.isNotBlank() }).also {
             calls[ledgerKey(generation, callId)] = it
         }
         val factClass = if (kind == "started" || kind == "incoming") "start" else if (kind == "ended") "terminal" else kind
@@ -229,7 +229,7 @@ internal class PendingCallEventsStore(
         "native_id" to call.callId,
         "provider_leg_id" to null,
         "provider_session_id" to null,
-        "android_call_control_id" to call.callId,
+        "android_call_control_id" to null,
         "outcome" to outcome,
     )
 
@@ -286,7 +286,7 @@ internal class PendingCallEventsStore(
                     node.required("generation").asText(),
                     node.required("call_id").asText(),
                     node.required("direction").asText(),
-                    node.required("remote").asText(),
+                    node.required("remote").takeUnless(JsonNode::isNull)?.asText(),
                 )
                 node.required("facts").fields().forEach { (name, fact) ->
                     call.facts[name] = StoredFact(
@@ -347,6 +347,7 @@ internal class PendingCallEventsStore(
             event.path("kind").asText() !in kinds ||
             event.path("direction").asText() !in directions ||
             nullableEventStrings.any { !event.path(it).isNull && !event.path(it).isTextual } ||
+            alwaysNullEventFields.any { !event.path(it).isNull } ||
             (!event.path("outcome").isNull && event.path("outcome").asText() !in outcomes)
         ) throw HistoryStoreException("history_corrupt")
     }
@@ -362,9 +363,10 @@ internal class PendingCallEventsStore(
         private val outcomes = setOf(null, "answered", "declined", "missed", "failed", "interrupted", "unknown")
         private fun callKey(callId: String) = "android:$callId"
         private fun ledgerKey(generation: String, callId: String) = "$generation\u0000$callId"
-        private val requiredEventStrings = setOf("event_id", "generation", "call_key", "kind", "direction", "at", "remote", "native_id", "android_call_control_id")
-        private val nullableEventStrings = setOf("sdk_id", "provider_leg_id", "provider_session_id", "outcome")
-        private val eventFields = requiredEventStrings + nullableEventStrings + "version"
+        private val requiredEventStrings = setOf("event_id", "generation", "call_key", "kind", "direction", "at", "native_id")
+        private val nullableEventStrings = setOf("remote", "sdk_id", "provider_leg_id", "provider_session_id", "outcome")
+        private val alwaysNullEventFields = setOf("android_call_control_id")
+        private val eventFields = requiredEventStrings + nullableEventStrings + alwaysNullEventFields + "version"
         private val timeFormat = object : ThreadLocal<SimpleDateFormat>() {
             override fun initialValue() = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.US).apply {
                 timeZone = TimeZone.getTimeZone("UTC")
@@ -380,13 +382,17 @@ internal object PendingCallEvents {
     @Volatile private var store: PendingCallEventsStore? = null
     @Volatile private var failureCode: String? = null
 
-    @Synchronized
     fun initialize(context: Context) {
+        val applicationContext = context.applicationContext
+        executor.execute { initializeNow(applicationContext) }
+    }
+
+    private fun initializeNow(context: Context) {
         if (store != null || failureCode != null) return
         try {
             if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) throw HistoryStoreException("history_unavailable")
             store = PendingCallEventsStore(
-                AtomicEventFile(File(context.applicationContext.noBackupFilesDir, "pending_call_events")),
+                AtomicEventFile(File(context.noBackupFilesDir, "pending_call_events")),
                 historyKey(),
             )
         } catch (error: HistoryStoreException) {
@@ -402,11 +408,26 @@ internal object PendingCallEvents {
         record(null, callId, scope, kind, direction, remote, outcome)
     }
 
+    fun recordStart(context: Context, callId: String, scope: String?, kind: String, direction: String, remote: String) {
+        val observedAt = System.currentTimeMillis()
+        val applicationContext = context.applicationContext
+        executor.execute {
+            try {
+                initializeNow(applicationContext)
+                store?.let { active ->
+                    active.record(callId, scope ?: active.scopeForStart(), kind, direction, remote, at = observedAt)
+                }
+            } catch (_: Exception) {
+                // Calls must continue when protected history storage is unavailable.
+            }
+        }
+    }
+
     fun record(context: Context?, callId: String, scope: String?, kind: String, direction: String, remote: String, outcome: String? = null) {
         val observedAt = System.currentTimeMillis()
         executor.execute {
             try {
-                if (store == null && context != null) initialize(context.applicationContext)
+                if (store == null && context != null) initializeNow(context.applicationContext)
                 store?.record(callId, scope, kind, direction, remote, outcome, observedAt)
             } catch (_: Exception) {
                 // Calls must continue when protected history storage is unavailable.

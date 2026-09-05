@@ -47,6 +47,27 @@ class PendingCallEventsTest {
     }
 
     @Test
+    fun blankRemoteReplaysAsNull() {
+        val file = TestEventFile(temporaryFolder.newFile())
+        val first = store(file)
+        first.setScope("scope-a")
+        first.record("call-a", first.scopeForStart(), "incoming", "inbound", "   ")
+
+        val event = first.pending("scope-a").single()
+        assertEquals(null, event["remote"])
+        assertEquals(event, store(file).pending("scope-a").single())
+    }
+
+    @Test
+    fun callControlIdRemainsNullUntilCallControlProvidesOne() {
+        val store = store()
+        store.setScope("scope-a")
+        store.record("call-a", store.scopeForStart(), "incoming", "inbound", "+12025550119")
+
+        assertEquals(null, store.pending("scope-a").single()["android_call_control_id"])
+    }
+
+    @Test
     fun ackRemovesOnlyDeliveredIdsAndLeavesLaterFacts() {
         val store = store()
         store.setScope("scope-a")
@@ -122,7 +143,7 @@ class PendingCallEventsTest {
     @Test
     fun rejectsVersionOneEventsWithUnexpectedPayloadFields() {
         val file = TestEventFile(temporaryFolder.newFile())
-        val event = """{"version":1,"event_id":"e1","generation":"scope-a","call_key":"android:call-a","kind":"incoming","direction":"inbound","at":"1970-01-01T00:00:01.000Z","remote":"+12025550119","sdk_id":null,"native_id":"call-a","provider_leg_id":null,"provider_session_id":null,"android_call_control_id":"call-a","outcome":null,"secret":"must-not-replay"}"""
+        val event = """{"version":1,"event_id":"e1","generation":"scope-a","call_key":"android:call-a","kind":"incoming","direction":"inbound","at":"1970-01-01T00:00:01.000Z","remote":"+12025550119","sdk_id":null,"native_id":"call-a","provider_leg_id":null,"provider_session_id":null,"android_call_control_id":null,"outcome":null,"secret":"must-not-replay"}"""
         val json = """{"version":1,"current_scope":"scope-a","tombstones":[],"calls":[{"generation":"scope-a","call_id":"call-a","direction":"inbound","remote":"+12025550119","facts":{"start":{"kind":"incoming","at":1000}}}],"pending":[{"fact_class":"start","delivered":false,"event":$event}]}"""
         file.write(PendingCallEventsCrypto.encrypt(json.toByteArray(), SecretKeySpec(ByteArray(32) { 7 }, "AES"), ByteArray(12) { 4 }))
 
