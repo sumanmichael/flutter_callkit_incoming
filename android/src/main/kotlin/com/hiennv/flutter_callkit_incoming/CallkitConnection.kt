@@ -10,7 +10,6 @@ import android.telecom.Connection
 import android.telecom.DisconnectCause
 import android.util.Log
 import androidx.annotation.RequiresApi
-import java.util.concurrent.ConcurrentHashMap
 
 /**
  * Self-managed Telecom [Connection] implementation for flutter_callkit_incoming.
@@ -28,7 +27,7 @@ import java.util.concurrent.ConcurrentHashMap
  *     broadcast to the matching connection via [find] and calls [setActive].
  *  3. User taps Decline / End → [setDisconnected] + [destroy] → unregister.
  *
- * Connection lookup uses a process-wide [ConcurrentHashMap] keyed by the call id
+ * Connection lookup uses a process-wide registry keyed by the call id
  * (the plugin's existing `Data.id` field). The OS holds the Connection object in
  * the Telecom framework; we keep a parallel reference so our BroadcastReceiver
  * can drive state transitions.
@@ -49,24 +48,26 @@ class CallkitConnection(
         /** Bundle key — pass the full call Data bundle through Telecom extras. */
         const val EXTRA_CALL_BUNDLE = "com.hiennv.flutter_callkit_incoming.CALL_BUNDLE"
 
-        private val activeConnections = ConcurrentHashMap<String, CallkitConnection>()
+        private val ownership = CallOwnership()
 
-        fun find(callId: String): CallkitConnection? = activeConnections[callId]
+        fun find(callId: String): CallkitConnection? = ownership.owner(callId) as? CallkitConnection
 
-        fun register(callId: String, conn: CallkitConnection) {
-            activeConnections[callId] = conn
-        }
+        fun register(callId: String, conn: CallkitConnection): Boolean = ownership.activate(callId, conn)
 
-        fun unregister(callId: String) {
-            activeConnections.remove(callId)
-        }
+        fun claimOutgoing(callId: String): Boolean = ownership.claimOutgoing(callId)
+
+        fun hasOutgoingClaim(callId: String): Boolean = ownership.hasOutgoingClaim(callId)
+
+        fun cancelOutgoing(callId: String) = ownership.cancelOutgoing(callId)
+
+        fun unregister(callId: String, conn: CallkitConnection) = ownership.finish(callId, conn)
 
         /** For testing / cleanup — release all refs (Connection objects already destroyed by OS). */
         fun clearAll() {
-            activeConnections.clear()
+            ownership.clear()
         }
 
-        fun activeCount(): Int = activeConnections.size
+        fun activeCount(): Int = ownership.activeCount()
     }
 
     init {
@@ -144,6 +145,11 @@ class CallkitConnection(
     fun markAccepted() {
         recordHistory("accepted")
         Log.d(TAG, "markAccepted id=$callId")
+        setActive()
+    }
+
+    fun markConnected() {
+        recordHistory("connected")
         setActive()
     }
 
@@ -225,7 +231,7 @@ class CallkitConnection(
         } catch (e: Exception) {
             Log.w(TAG, "setDisconnected failed: ${e.message}")
         }
-        unregister(callId)
+        unregister(callId, this)
         try {
             destroy()
         } catch (e: Exception) {

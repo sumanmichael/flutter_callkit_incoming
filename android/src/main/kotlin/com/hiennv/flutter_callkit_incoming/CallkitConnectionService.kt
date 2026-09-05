@@ -55,7 +55,9 @@ class CallkitConnectionService : ConnectionService() {
             Log.w(TAG, "onCreateIncomingConnection: empty call id")
             return failed("Empty call id")
         }
-
+        if (CallkitConnection.find(callId) != null) {
+            return failed("Duplicate incoming call")
+        }
         Log.d(TAG, "onCreateIncomingConnection id=$callId caller=${data.nameCaller}")
 
         val connection = CallkitConnection(callId, callBundle).apply {
@@ -95,6 +97,10 @@ class CallkitConnectionService : ConnectionService() {
             Log.w(TAG, "onCreateOutgoingConnection: empty call id")
             return failed("Empty call id")
         }
+        if (!CallkitConnection.hasOutgoingClaim(callId) || CallkitConnection.find(callId) != null) {
+            CallkitConnection.cancelOutgoing(callId)
+            return failed("Duplicate or unowned outgoing call")
+        }
 
         Log.d(TAG, "onCreateOutgoingConnection id=$callId callee=${data.nameCaller}")
 
@@ -116,6 +122,11 @@ class CallkitConnectionService : ConnectionService() {
         connectionManagerPhoneAccount: PhoneAccountHandle?,
         request: ConnectionRequest?,
     ) {
+        extractCallBundle(request?.extras)?.let { bundle ->
+            runCatching { Data.fromBundle(bundle).id }
+                .getOrNull()
+                ?.let(CallkitConnection::cancelOutgoing)
+        }
         super.onCreateOutgoingConnectionFailed(connectionManagerPhoneAccount, request)
         Log.w(TAG, "onCreateOutgoingConnectionFailed")
     }
@@ -126,6 +137,9 @@ class CallkitConnectionService : ConnectionService() {
         // dedicated key. Telecom also exposes the caller-supplied extras under
         // EXTRA_INCOMING_CALL_EXTRAS for the incoming path.
         extras.getBundle(CallkitConnection.EXTRA_CALL_BUNDLE)?.let { return it }
+        extras.getBundle(TelecomManager.EXTRA_OUTGOING_CALL_EXTRAS)?.let { inner ->
+            inner.getBundle(CallkitConnection.EXTRA_CALL_BUNDLE)?.let { return it }
+        }
         extras.getBundle(TelecomManager.EXTRA_INCOMING_CALL_EXTRAS)?.let { inner ->
             inner.getBundle(CallkitConnection.EXTRA_CALL_BUNDLE)?.let { return it }
             if (inner.containsKey("id")) return inner

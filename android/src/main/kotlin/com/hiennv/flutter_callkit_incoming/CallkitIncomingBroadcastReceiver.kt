@@ -164,6 +164,7 @@ class CallkitIncomingBroadcastReceiver : BroadcastReceiver() {
             CallkitConstants.ACTION_CALL_DECLINE -> conn.markDeclined(context)
             CallkitConstants.ACTION_CALL_ENDED -> conn.markEnded()
             CallkitConstants.ACTION_CALL_TIMEOUT -> conn.markMissed()
+            CallkitConstants.ACTION_CALL_CONNECTED -> conn.markConnected()
         }
     }
 
@@ -202,6 +203,7 @@ class CallkitIncomingBroadcastReceiver : BroadcastReceiver() {
                         CallkitConstants.ACTION_CALL_START,
                         data
                     )
+                    registerTelecomOutgoingCall(context, data)
                     sendEventFlutter(CallkitConstants.ACTION_CALL_START, data)
                     addCall(context, Data.fromBundle(data), true)
                 } catch (error: Exception) {
@@ -275,6 +277,7 @@ class CallkitIncomingBroadcastReceiver : BroadcastReceiver() {
             "${context.packageName}.${CallkitConstants.ACTION_CALL_CONNECTED}" -> {
                 try {
                     captureFact(context, data, "connected")
+                    driveTelecomConnection(context, data, CallkitConstants.ACTION_CALL_CONNECTED)
                     // update notification on going connected
                     getCallkitNotificationManager()?.showOngoingCallNotification(data, true)
                     sendEventFlutter(CallkitConstants.ACTION_CALL_CONNECTED, data)
@@ -313,6 +316,11 @@ class CallkitIncomingBroadcastReceiver : BroadcastReceiver() {
             direction,
             data.getString(CallkitConstants.EXTRA_CALLKIT_HANDLE, ""),
         )
+    }
+
+    private fun registerTelecomOutgoingCall(context: Context, data: Bundle) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+        InAppCallManager(context.applicationContext).placeOutgoingCall(data)
     }
 
     private fun captureFact(context: Context, data: Bundle, kind: String, outcome: String? = null) {
