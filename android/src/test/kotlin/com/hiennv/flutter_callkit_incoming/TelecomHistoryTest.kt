@@ -8,6 +8,18 @@ import org.junit.Test
 
 class TelecomHistoryTest {
     @Test
+    fun phoneAccountRegistrationFailureUsesFixedHistoryError() {
+        val availability = NativeHistoryAvailability()
+
+        availability.reportPhoneAccountRegistration(false)
+        assertEquals("history_unavailable", availability.failureCode(null))
+        assertEquals("history_corrupt", availability.failureCode("history_corrupt"))
+
+        availability.reportPhoneAccountRegistration(true)
+        assertEquals(null, availability.failureCode(null))
+    }
+
+    @Test
     fun transactionalTelecomStartsAtAndroid361() {
         assertFalse(supportsTransactionalTelecom(null))
         assertFalse(supportsTransactionalTelecom(3600000))

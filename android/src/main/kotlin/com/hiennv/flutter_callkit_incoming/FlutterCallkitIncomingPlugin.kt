@@ -187,7 +187,8 @@ class FlutterCallkitIncomingPlugin : FlutterPlugin, MethodCallHandler, ActivityA
     override fun onAttachedToEngine(flutterPluginBinding: FlutterPlugin.FlutterPluginBinding) {
         sharePluginWithRegister(flutterPluginBinding)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            InAppCallManager(flutterPluginBinding.applicationContext).registerPhoneAccount()
+            val registered = InAppCallManager(flutterPluginBinding.applicationContext).registerPhoneAccount()
+            PendingCallEvents.reportPhoneAccountRegistration(registered)
         }
     }
 

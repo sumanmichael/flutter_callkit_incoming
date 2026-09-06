@@ -27,6 +27,17 @@ import javax.crypto.spec.GCMParameterSpec
 
 internal class HistoryStoreException(val code: String) : RuntimeException(code)
 
+internal class NativeHistoryAvailability {
+    private var phoneAccountRegistrationFailed = false
+
+    fun reportPhoneAccountRegistration(registered: Boolean) {
+        phoneAccountRegistrationFailed = !registered
+    }
+
+    fun failureCode(storageFailureCode: String?): String? =
+        storageFailureCode ?: if (phoneAccountRegistrationFailed) "history_unavailable" else null
+}
+
 internal interface EventFile {
     fun read(): ByteArray?
     fun write(bytes: ByteArray)
@@ -491,12 +502,17 @@ internal object PendingCallEvents {
     const val directionExtra = "com.hiennv.flutter_callkit_incoming.HISTORY_DIRECTION"
     const val sessionExtra = "com.hiennv.flutter_callkit_incoming.HISTORY_SESSION"
     private val executor = Executors.newSingleThreadExecutor()
+    private val availability = NativeHistoryAvailability()
     @Volatile private var store: PendingCallEventsStore? = null
     @Volatile private var failureCode: String? = null
 
     fun initialize(context: Context) {
         val applicationContext = context.applicationContext
         executor.execute { initializeNow(applicationContext) }
+    }
+
+    fun reportPhoneAccountRegistration(registered: Boolean) {
+        executor.execute { availability.reportPhoneAccountRegistration(registered) }
     }
 
     private fun initializeNow(context: Context) {
@@ -564,7 +580,8 @@ internal object PendingCallEvents {
     fun handle(call: MethodCall, result: MethodChannel.Result) {
         executor.execute {
             try {
-                val active = store ?: throw HistoryStoreException(failureCode ?: "history_unavailable")
+                availability.failureCode(failureCode)?.let { throw HistoryStoreException(it) }
+                val active = store ?: throw HistoryStoreException("history_unavailable")
                 val args = call.arguments as? Map<*, *> ?: throw HistoryStoreException("history_invalid_arguments")
                 val generation = args["generation"] as? String ?: throw HistoryStoreException("history_invalid_arguments")
                 val value: Any? = when (call.method) {
