@@ -14,7 +14,6 @@ import io.flutter.plugin.common.MethodChannel
 import java.io.File
 import java.net.URI
 import java.security.KeyStore
-import java.security.SecureRandom
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -73,10 +72,11 @@ private class AtomicEventFile(file: File) : EventFile {
 internal object PendingCallEventsCrypto {
     private val aad = "vspphone-history-1".toByteArray(Charsets.US_ASCII)
 
-    fun encrypt(plain: ByteArray, key: SecretKey, nonce: ByteArray): ByteArray {
-        require(nonce.size == 12)
+    fun encrypt(plain: ByteArray, key: SecretKey): ByteArray {
         val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-        cipher.init(Cipher.ENCRYPT_MODE, key, GCMParameterSpec(128, nonce))
+        cipher.init(Cipher.ENCRYPT_MODE, key)
+        val nonce = cipher.iv
+        require(nonce.size == 12)
         cipher.updateAAD(aad)
         return byteArrayOf(1) + nonce + cipher.doFinal(plain)
     }
@@ -164,7 +164,6 @@ internal class PendingCallEventsStore(
     private val key: SecretKey,
     private val now: () -> Long = System::currentTimeMillis,
     private val newId: () -> String = { UUID.randomUUID().toString() },
-    private val newNonce: () -> ByteArray = { ByteArray(12).also(SecureRandom()::nextBytes) },
 ) {
     private val mapper = ObjectMapper()
     @Volatile private var currentScope: String? = null
@@ -507,7 +506,7 @@ internal class PendingCallEventsStore(
                 .put("delivered", request.delivered)
         }
         try {
-            file.write(PendingCallEventsCrypto.encrypt(mapper.writeValueAsBytes(root), key, newNonce()))
+            file.write(PendingCallEventsCrypto.encrypt(mapper.writeValueAsBytes(root), key))
         } catch (error: HistoryStoreException) {
             throw error
         } catch (_: Exception) {

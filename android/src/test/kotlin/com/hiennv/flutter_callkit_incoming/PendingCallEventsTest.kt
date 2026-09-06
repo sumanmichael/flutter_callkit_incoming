@@ -2,7 +2,6 @@ package com.hiennv.flutter_callkit_incoming
 
 import java.io.File
 import javax.crypto.spec.SecretKeySpec
-import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
@@ -18,7 +17,6 @@ class PendingCallEventsTest {
 
     private var now = 1_000L
     private var nextId = 0
-    private var nextNonce = 0
 
     private fun store(
         file: EventFile = TestEventFile(temporaryFolder.newFile()),
@@ -28,7 +26,6 @@ class PendingCallEventsTest {
         key = SecretKeySpec(ByteArray(32) { keyByte }, "AES"),
         now = { now },
         newId = { "event-${++nextId}" },
-        newNonce = { (++nextNonce).toByte().let { value -> ByteArray(12) { value } } },
     )
 
     @Test
@@ -423,13 +420,13 @@ class PendingCallEventsTest {
         assertHistoryFailure("history_corrupt") { store(wrongKeyFile, keyByte = 8) }
 
         val unknownEnvelope = TestEventFile(temporaryFolder.newFile()).apply {
-            write(PendingCallEventsCrypto.encrypt("{\"version\":2}".toByteArray(), SecretKeySpec(ByteArray(32) { 7 }, "AES"), ByteArray(12) { 4 }))
+            write(PendingCallEventsCrypto.encrypt("{\"version\":2}".toByteArray(), SecretKeySpec(ByteArray(32) { 7 }, "AES")))
         }
         assertHistoryFailure("history_unknown_version") { store(unknownEnvelope) }
 
         val unknownEvent = TestEventFile(temporaryFolder.newFile()).apply {
             val json = """{"version":1,"current_scope":"scope-a","tombstones":[],"calls":[],"pending":[{"fact_class":"start","delivered":false,"event":{"version":2}}]}"""
-            write(PendingCallEventsCrypto.encrypt(json.toByteArray(), SecretKeySpec(ByteArray(32) { 7 }, "AES"), ByteArray(12) { 4 }))
+            write(PendingCallEventsCrypto.encrypt(json.toByteArray(), SecretKeySpec(ByteArray(32) { 7 }, "AES")))
         }
         assertHistoryFailure("history_unknown_version") { store(unknownEvent) }
     }
@@ -439,7 +436,7 @@ class PendingCallEventsTest {
         val file = TestEventFile(temporaryFolder.newFile())
         val event = """{"version":1,"event_id":"e1","generation":"scope-a","call_key":"android:call-a","kind":"incoming","direction":"inbound","at":"1970-01-01T00:00:01.000Z","remote":"+12025550119","sdk_id":null,"native_id":"call-a","provider_leg_id":null,"provider_session_id":null,"android_call_control_id":null,"outcome":null,"secret":"must-not-replay"}"""
         val json = """{"version":1,"current_scope":"scope-a","tombstones":[],"calls":[{"generation":"scope-a","call_id":"call-a","direction":"inbound","remote":"+12025550119","facts":{"start":{"kind":"incoming","at":1000}}}],"pending":[{"fact_class":"start","delivered":false,"event":$event}]}"""
-        file.write(PendingCallEventsCrypto.encrypt(json.toByteArray(), SecretKeySpec(ByteArray(32) { 7 }, "AES"), ByteArray(12) { 4 }))
+        file.write(PendingCallEventsCrypto.encrypt(json.toByteArray(), SecretKeySpec(ByteArray(32) { 7 }, "AES")))
 
         assertHistoryFailure("history_corrupt") { store(file) }
     }
@@ -476,13 +473,14 @@ class PendingCallEventsTest {
         val file = TestEventFile(temporaryFolder.newFile())
         val store = store(file)
         store.setScope("scope-a")
-        val first = file.read()!!.copyOfRange(1, 13)
+        val first = file.read()!!
         store.record("call-a", store.scopeForStart(), "incoming", "inbound", "+12025550119")
-        val second = file.read()!!.copyOfRange(1, 13)
+        val second = file.read()!!
+        val key = SecretKeySpec(ByteArray(32) { 7 }, "AES")
 
-        assertFalse(first.contentEquals(second))
-        assertArrayEquals(ByteArray(12) { 1 }, first)
-        assertArrayEquals(ByteArray(12) { 2 }, second)
+        assertFalse(first.copyOfRange(1, 13).contentEquals(second.copyOfRange(1, 13)))
+        assertTrue(String(PendingCallEventsCrypto.decrypt(first, key)).contains("\"current_scope\":\"scope-a\""))
+        assertTrue(String(PendingCallEventsCrypto.decrypt(second, key)).contains("\"current_scope\":\"scope-a\""))
     }
 
     @Test
