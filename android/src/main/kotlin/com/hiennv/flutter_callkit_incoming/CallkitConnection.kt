@@ -70,11 +70,17 @@ class CallkitConnection(
 
         fun unregister(callId: String, conn: CallkitConnection) = ownership.finish(callId, conn)
 
-        fun drive(callId: String, sessionKey: String?, context: Context, action: String): Boolean? {
+        fun drive(
+            callId: String,
+            sessionKey: String?,
+            context: Context,
+            action: String,
+            outcome: String? = null,
+        ): Boolean? {
             if (ownership.owner(callId) == null) return null
             var applied = false
             val matched = ownership.dispatch(callId, sessionKey) { owner ->
-                applied = (owner as CallkitConnection).driveFromOwner(context, action)
+                applied = (owner as CallkitConnection).driveFromOwner(context, action, outcome)
             }
             return matched && applied
         }
@@ -154,12 +160,12 @@ class CallkitConnection(
     // App → Telecom driving helpers (invoked by the plugin's BroadcastReceiver)
     // -------------------------------------------------------------------------
 
-    private fun driveFromOwner(context: Context, action: String): Boolean {
-        if (!eventRouter.fromOwner(action)) return false
+    private fun driveFromOwner(context: Context, action: String, outcome: String?): Boolean {
+        if (!eventRouter.fromOwner(action, outcome)) return false
         when (action) {
             CallkitConstants.ACTION_CALL_ACCEPT -> markAccepted()
             CallkitConstants.ACTION_CALL_DECLINE -> markDeclined(context)
-            CallkitConstants.ACTION_CALL_ENDED -> markEnded()
+            CallkitConstants.ACTION_CALL_ENDED -> markEnded(outcome)
             CallkitConstants.ACTION_CALL_TIMEOUT -> markMissed()
             CallkitConstants.ACTION_CALL_CONNECTED -> markConnected()
         }
@@ -237,8 +243,8 @@ class CallkitConnection(
     }
 
     /** Mark the call as terminated — call ended (either side hung up). */
-    fun markEnded() {
-        recordHistory("ended")
+    fun markEnded(outcome: String? = null) {
+        recordHistory("ended", outcome)
         Log.d(TAG, "markEnded id=$callId")
         finishWithCause(DisconnectCause.LOCAL)
     }

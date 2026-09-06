@@ -6,6 +6,7 @@ import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Rule
 import org.junit.Test
@@ -139,6 +140,41 @@ class PendingCallEventsTest {
 
         assertEquals(listOf("incoming", "ended"), restarted.pending("scope-a").map { it["kind"] })
         assertEquals(listOf("incoming"), restarted.pending("scope-b").map { it["kind"] })
+    }
+
+    @Test
+    fun abortedTelecomOwnerPersistsOneFailedTerminal() {
+        val store = store()
+        store.setScope("scope-a")
+        store.recordStart(
+            "call-a",
+            "session-a",
+            store.scopeForStart(),
+            "started",
+            "outbound",
+            "+12025550119",
+        )
+        lateinit var router: TelecomEventRouter
+        router = TelecomEventRouter { action, outcome ->
+            if (router.fromOwner(action, outcome)) {
+                store.record(
+                    "call-a",
+                    "scope-a",
+                    "ended",
+                    "outbound",
+                    "+12025550119",
+                    outcome,
+                    sessionKey = "session-a",
+                )
+            }
+        }
+
+        assertTrue(router.fromTelecom(CallkitConstants.ACTION_CALL_ENDED, "failed"))
+        assertFalse(router.fromTelecom(CallkitConstants.ACTION_CALL_ENDED, "failed"))
+
+        val terminal = store.pending("scope-a").single { it["kind"] == "ended" }
+        assertEquals("failed", terminal["outcome"])
+        assertEquals(1, store.pending("scope-a").count { it["kind"] == "ended" })
     }
 
     @Test

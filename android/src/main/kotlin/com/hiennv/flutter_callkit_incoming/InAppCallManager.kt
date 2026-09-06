@@ -83,7 +83,7 @@ internal class TelecomEventRouter(private val sendToOwner: (String, String?) -> 
     }
 
     @Synchronized
-    fun fromOwner(action: String): Boolean {
+    fun fromOwner(action: String, outcome: String? = null): Boolean {
         val key = eventKey(action)
         if (key in ownerEvents || isBlockedByTerminal(key)) return false
         ownerEvents += key

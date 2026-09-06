@@ -151,7 +151,12 @@ class CallkitIncomingBroadcastReceiver : BroadcastReceiver() {
         }
     }
 
-    private fun driveTelecomConnection(context: Context, data: Bundle, action: String): Boolean? {
+    private fun driveTelecomConnection(
+        context: Context,
+        data: Bundle,
+        action: String,
+        outcome: String? = null,
+    ): Boolean? {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return null
         val callId = data.getString(CallkitConstants.EXTRA_CALLKIT_ID, "")
         if (callId.isEmpty()) return null
@@ -160,6 +165,7 @@ class CallkitIncomingBroadcastReceiver : BroadcastReceiver() {
             data.getString(PendingCallEvents.sessionExtra),
             context,
             action,
+            outcome,
         )
     }
 
@@ -241,13 +247,15 @@ class CallkitIncomingBroadcastReceiver : BroadcastReceiver() {
 
             "${context.packageName}.${CallkitConstants.ACTION_CALL_ENDED}" -> {
                 try {
-                    if (driveTelecomConnection(context, data, CallkitConstants.ACTION_CALL_ENDED) == false) return
-                    captureFact(
+                    val outcome = data.getString(CallkitConnection.EXTRA_HISTORY_OUTCOME)
+                    val driven = driveTelecomConnection(
                         context,
                         data,
-                        "ended",
-                        data.getString(CallkitConnection.EXTRA_HISTORY_OUTCOME),
+                        CallkitConstants.ACTION_CALL_ENDED,
+                        outcome,
                     )
+                    if (driven == false) return
+                    if (driven != true) captureFact(context, data, "ended", outcome)
                     FlutterCallkitIncomingPlugin.notifyEventCallbacks(CallkitEventCallback.CallEvent.END, data)
                     // clear notification and stop service
                     getCallkitNotificationManager()?.clearIncomingNotification(data, false)
