@@ -27,6 +27,13 @@ import javax.crypto.spec.GCMParameterSpec
 
 internal class HistoryStoreException(val code: String) : RuntimeException(code)
 
+internal fun runHistoryBestEffort(block: () -> Unit): Boolean = try {
+    block()
+    true
+} catch (_: Exception) {
+    false
+}
+
 internal class NativeHistoryAvailability {
     private var phoneAccountRegistrationFailed = false
 
@@ -542,13 +549,11 @@ internal object PendingCallEvents {
         val observedAt = System.currentTimeMillis()
         val applicationContext = context.applicationContext
         executor.execute {
-            try {
+            runHistoryBestEffort {
                 initializeNow(applicationContext)
                 store?.let { active ->
                     active.recordStart(callId, sessionKey, scope, kind, direction, remote, observedAt)
                 }
-            } catch (_: Exception) {
-                // Calls must continue when protected history storage is unavailable.
             }
         }
     }
@@ -556,11 +561,9 @@ internal object PendingCallEvents {
     fun record(context: Context?, callId: String, scope: String?, kind: String, direction: String, remote: String, outcome: String? = null, sessionKey: String? = null) {
         val observedAt = System.currentTimeMillis()
         executor.execute {
-            try {
+            runHistoryBestEffort {
                 if (store == null && context != null) initializeNow(context.applicationContext)
                 store?.record(callId, scope, kind, direction, remote, outcome, observedAt, sessionKey)
-            } catch (_: Exception) {
-                // Calls must continue when protected history storage is unavailable.
             }
         }
     }
@@ -568,11 +571,9 @@ internal object PendingCallEvents {
     fun attachCallControl(context: Context, sessionKey: String, callControlId: String) {
         val applicationContext = context.applicationContext
         executor.execute {
-            try {
+            runHistoryBestEffort {
                 initializeNow(applicationContext)
                 store?.attachCallControl(sessionKey, callControlId)
-            } catch (_: Exception) {
-                // Calls must continue when protected history storage is unavailable.
             }
         }
     }

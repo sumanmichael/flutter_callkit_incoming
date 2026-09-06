@@ -24,6 +24,8 @@ class TelecomHistoryTest {
         assertFalse(supportsTransactionalTelecom(null))
         assertFalse(supportsTransactionalTelecom(3600000))
         assertTrue(supportsTransactionalTelecom(3600001))
+        assertEquals(TelecomPath.LEGACY, telecomPath(3600000))
+        assertEquals(TelecomPath.TRANSACTIONAL, telecomPath(3600001))
     }
 
     @Test
@@ -110,6 +112,33 @@ class TelecomHistoryTest {
         )
         assertTrue(router.fromOwner(CallkitConstants.ACTION_CALL_ENDED))
         assertFalse(router.fromOwner(CallkitConstants.ACTION_CALL_ENDED))
+    }
+
+    @Test
+    fun modernLifecycleCallbacksRouteThroughOwnerExactlyOnce() {
+        val sent = mutableListOf<String>()
+        val lifecycle = ModernLifecycleRouter { action, _ -> sent += action }
+
+        val actions = listOf(
+            CallkitConstants.ACTION_CALL_ACCEPT,
+            CallkitConstants.ACTION_CALL_CONNECTED,
+            CallkitConstants.ACTION_CALL_ENDED,
+        )
+        actions.forEach { action ->
+            assertTrue(lifecycle.fromTelecom(action))
+            assertFalse(lifecycle.fromTelecom(action))
+            val owner = lifecycle.fromOwner(action)
+            assertTrue(owner.accepted)
+            assertTrue(owner.originatedInTelecom)
+            assertFalse(lifecycle.fromOwner(action).accepted)
+        }
+        assertEquals(actions, sent)
+    }
+
+    @Test
+    fun historyStorageFailureIsBestEffort() {
+        assertFalse(runHistoryBestEffort { error("storage failed") })
+        assertTrue(runHistoryBestEffort { Unit })
     }
 
     @Test

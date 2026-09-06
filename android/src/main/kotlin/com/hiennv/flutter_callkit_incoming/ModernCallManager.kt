@@ -17,7 +17,12 @@ import android.telecom.VideoProfile
 import java.util.concurrent.Executor
 import java.util.function.Consumer
 
-internal const val BAKLAVA_1_FULL_SDK = 3_600_001
+internal const val BAKLAVA_1_FULL_SDK = Build.VERSION_CODES_FULL.BAKLAVA_1
+
+internal enum class TelecomPath { LEGACY, TRANSACTIONAL }
+
+internal fun telecomPath(fullSdkInt: Int?): TelecomPath =
+    if (supportsTransactionalTelecom(fullSdkInt)) TelecomPath.TRANSACTIONAL else TelecomPath.LEGACY
 
 internal fun supportsTransactionalTelecom(fullSdkInt: Int?): Boolean =
     fullSdkInt != null && fullSdkInt >= BAKLAVA_1_FULL_SDK
@@ -31,7 +36,42 @@ internal fun currentFullSdkInt(): Int? {
     }
 }
 
-internal fun usesTransactionalTelecom(): Boolean = supportsTransactionalTelecom(currentFullSdkInt())
+internal fun usesTransactionalTelecom(): Boolean = telecomPath(currentFullSdkInt()) == TelecomPath.TRANSACTIONAL
+
+internal data class ModernOwnerRoute(
+    val accepted: Boolean,
+    val originatedInTelecom: Boolean,
+)
+
+internal class ModernLifecycleRouter(sendToOwner: (String, String?) -> Unit) {
+    private val router = TelecomEventRouter(sendToOwner)
+    private val telecomOrigins = mutableSetOf<String>()
+
+    @Synchronized
+    fun fromTelecom(action: String, outcome: String? = null): Boolean {
+        val key = eventKey(action)
+        if (!telecomOrigins.add(key)) return false
+        val accepted = router.fromTelecom(action, outcome)
+        if (!accepted) telecomOrigins.remove(key)
+        return accepted
+    }
+
+    @Synchronized
+    fun fromOwner(action: String, outcome: String? = null): ModernOwnerRoute {
+        val accepted = router.fromOwner(action, outcome)
+        return ModernOwnerRoute(
+            accepted,
+            accepted && telecomOrigins.remove(eventKey(action)),
+        )
+    }
+
+    private fun eventKey(action: String): String = when (action) {
+        CallkitConstants.ACTION_CALL_DECLINE,
+        CallkitConstants.ACTION_CALL_ENDED,
+        CallkitConstants.ACTION_CALL_TIMEOUT -> "terminal"
+        else -> action
+    }
+}
 
 @SuppressLint("NewApi", "MissingPermission")
 internal object ModernCallManager {
@@ -128,8 +168,7 @@ internal object ModernCallManager {
         source: Bundle,
     ) : CallControlCallback, CallEventCallback {
         private val bundle = Bundle(source)
-        private val telecomOrigins = mutableSetOf<String>()
-        private val router = TelecomEventRouter { action, outcome ->
+        private val lifecycle = ModernLifecycleRouter { action, outcome ->
             val eventBundle = Bundle(bundle)
             outcome?.let { eventBundle.putString(CallkitConnection.EXTRA_HISTORY_OUTCOME, it) }
             context.sendBroadcast(CallkitIncomingBroadcastReceiver.getIntent(context, action, eventBundle))
@@ -143,18 +182,10 @@ internal object ModernCallManager {
             pendingControlActions.toList().also { pendingControlActions.clear() }.forEach(::applyToControl)
         }
 
-        @Synchronized
-        private fun rememberTelecomOrigin(action: String) {
-            telecomOrigins += eventKey(action)
-        }
-
-        @Synchronized
-        private fun consumeTelecomOrigin(action: String): Boolean = telecomOrigins.remove(eventKey(action))
-
         fun drive(action: String, outcome: String?): Boolean {
-            if (!router.fromOwner(action, outcome)) return false
-            val fromTelecom = consumeTelecomOrigin(action)
-            if (!fromTelecom) {
+            val route = lifecycle.fromOwner(action, outcome)
+            if (!route.accepted) return false
+            if (!route.originatedInTelecom) {
                 if (control == null && eventKey(action) != TERMINAL) {
                     synchronized(this) {
                         if (control == null) pendingControlActions += action else applyToControl(action)
@@ -168,16 +199,16 @@ internal object ModernCallManager {
         }
 
         override fun onAnswer(videoState: Int, result: Consumer<Boolean>) {
-            rememberTelecomOrigin(CallkitConstants.ACTION_CALL_ACCEPT)
-            result.accept(router.fromTelecom(CallkitConstants.ACTION_CALL_ACCEPT))
+            result.accept(lifecycle.fromTelecom(CallkitConstants.ACTION_CALL_ACCEPT))
         }
 
         override fun onDisconnect(cause: DisconnectCause, result: Consumer<Boolean>) {
-            rememberTelecomOrigin(CallkitConstants.ACTION_CALL_ENDED)
-            result.accept(router.fromTelecom(CallkitConstants.ACTION_CALL_ENDED))
+            result.accept(lifecycle.fromTelecom(CallkitConstants.ACTION_CALL_ENDED))
         }
 
-        override fun onSetActive(result: Consumer<Boolean>) = result.accept(true)
+        override fun onSetActive(result: Consumer<Boolean>) {
+            result.accept(lifecycle.fromTelecom(CallkitConstants.ACTION_CALL_CONNECTED))
+        }
 
         override fun onSetInactive(result: Consumer<Boolean>) = result.accept(true)
 
