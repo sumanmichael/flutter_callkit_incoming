@@ -151,21 +151,16 @@ class CallkitIncomingBroadcastReceiver : BroadcastReceiver() {
         }
     }
 
-    private fun driveTelecomConnection(context: Context, data: Bundle, action: String) {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return
-        val parsed = try {
-            Data.fromBundle(data)
-        } catch (e: Exception) {
-            null
-        } ?: return
-        val conn = CallkitConnection.find(parsed.id) ?: return
-        when (action) {
-            CallkitConstants.ACTION_CALL_ACCEPT -> conn.markAccepted()
-            CallkitConstants.ACTION_CALL_DECLINE -> conn.markDeclined(context)
-            CallkitConstants.ACTION_CALL_ENDED -> conn.markEnded()
-            CallkitConstants.ACTION_CALL_TIMEOUT -> conn.markMissed()
-            CallkitConstants.ACTION_CALL_CONNECTED -> conn.markConnected()
-        }
+    private fun driveTelecomConnection(context: Context, data: Bundle, action: String): Boolean? {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return null
+        val callId = data.getString(CallkitConstants.EXTRA_CALLKIT_ID, "")
+        if (callId.isEmpty()) return null
+        return CallkitConnection.drive(
+            callId,
+            data.getString(PendingCallEvents.sessionExtra),
+            context,
+            action,
+        )
     }
 
 
@@ -213,8 +208,8 @@ class CallkitIncomingBroadcastReceiver : BroadcastReceiver() {
 
             "${context.packageName}.${CallkitConstants.ACTION_CALL_ACCEPT}" -> {
                 try {
+                    if (driveTelecomConnection(context, data, CallkitConstants.ACTION_CALL_ACCEPT) == false) return
                     captureFact(context, data, "accepted")
-                    driveTelecomConnection(context, data, CallkitConstants.ACTION_CALL_ACCEPT)
                     FlutterCallkitIncomingPlugin.notifyEventCallbacks(CallkitEventCallback.CallEvent.ACCEPT, data)
                     // start service and show ongoing call when call is accepted
                     CallkitNotificationService.startServiceWithAction(
@@ -232,8 +227,8 @@ class CallkitIncomingBroadcastReceiver : BroadcastReceiver() {
 
             "${context.packageName}.${CallkitConstants.ACTION_CALL_DECLINE}" -> {
                 try {
+                    if (driveTelecomConnection(context, data, CallkitConstants.ACTION_CALL_DECLINE) == false) return
                     captureFact(context, data, "ended", "declined")
-                    driveTelecomConnection(context, data, CallkitConstants.ACTION_CALL_DECLINE)
                     FlutterCallkitIncomingPlugin.notifyEventCallbacks(CallkitEventCallback.CallEvent.DECLINE, data)
                     // clear notification
                     getCallkitNotificationManager()?.clearIncomingNotification(data, false)
@@ -246,8 +241,8 @@ class CallkitIncomingBroadcastReceiver : BroadcastReceiver() {
 
             "${context.packageName}.${CallkitConstants.ACTION_CALL_ENDED}" -> {
                 try {
+                    if (driveTelecomConnection(context, data, CallkitConstants.ACTION_CALL_ENDED) == false) return
                     captureFact(context, data, "ended")
-                    driveTelecomConnection(context, data, CallkitConstants.ACTION_CALL_ENDED)
                     FlutterCallkitIncomingPlugin.notifyEventCallbacks(CallkitEventCallback.CallEvent.END, data)
                     // clear notification and stop service
                     getCallkitNotificationManager()?.clearIncomingNotification(data, false)
@@ -261,8 +256,8 @@ class CallkitIncomingBroadcastReceiver : BroadcastReceiver() {
 
             "${context.packageName}.${CallkitConstants.ACTION_CALL_TIMEOUT}" -> {
                 try {
+                    if (driveTelecomConnection(context, data, CallkitConstants.ACTION_CALL_TIMEOUT) == false) return
                     captureFact(context, data, "ended", "missed")
-                    driveTelecomConnection(context, data, CallkitConstants.ACTION_CALL_TIMEOUT)
                     // clear notification and show miss notification
                     val notificationManager = getCallkitNotificationManager()
                     notificationManager?.clearIncomingNotification(data, false)
@@ -276,8 +271,8 @@ class CallkitIncomingBroadcastReceiver : BroadcastReceiver() {
 
             "${context.packageName}.${CallkitConstants.ACTION_CALL_CONNECTED}" -> {
                 try {
+                    if (driveTelecomConnection(context, data, CallkitConstants.ACTION_CALL_CONNECTED) == false) return
                     captureFact(context, data, "connected")
-                    driveTelecomConnection(context, data, CallkitConstants.ACTION_CALL_CONNECTED)
                     // update notification on going connected
                     getCallkitNotificationManager()?.showOngoingCallNotification(data, true)
                     sendEventFlutter(CallkitConstants.ACTION_CALL_CONNECTED, data)

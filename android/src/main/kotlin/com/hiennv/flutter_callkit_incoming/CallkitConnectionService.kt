@@ -60,7 +60,7 @@ class CallkitConnectionService : ConnectionService() {
         }
         Log.d(TAG, "onCreateIncomingConnection id=$callId caller=${data.nameCaller}")
 
-        val connection = CallkitConnection(callId, callBundle).apply {
+        val connection = CallkitConnection(applicationContext, callId, callBundle).apply {
             if (data.nameCaller.isNotEmpty()) {
                 setCallerDisplayName(data.nameCaller, TelecomManager.PRESENTATION_ALLOWED)
             }
@@ -104,7 +104,7 @@ class CallkitConnectionService : ConnectionService() {
 
         Log.d(TAG, "onCreateOutgoingConnection id=$callId callee=${data.nameCaller}")
 
-        val connection = CallkitConnection(callId, callBundle).apply {
+        val connection = CallkitConnection(applicationContext, callId, callBundle).apply {
             if (data.nameCaller.isNotEmpty()) {
                 setCallerDisplayName(data.nameCaller, TelecomManager.PRESENTATION_ALLOWED)
             }

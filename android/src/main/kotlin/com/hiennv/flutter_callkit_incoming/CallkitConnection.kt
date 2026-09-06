@@ -34,6 +34,7 @@ import androidx.annotation.RequiresApi
  */
 @RequiresApi(Build.VERSION_CODES.M)
 class CallkitConnection(
+    private val context: Context,
     val callId: String,
     val bundle: Bundle,
 ) : Connection() {
@@ -41,6 +42,9 @@ class CallkitConnection(
     private val historySession = bundle.getString(PendingCallEvents.sessionExtra)
     private val historyDirection = bundle.getString(PendingCallEvents.directionExtra, "inbound")
     private val historyRemote = bundle.getString(CallkitConstants.EXTRA_CALLKIT_HANDLE, "")
+    private val eventRouter = TelecomEventRouter { action ->
+        context.sendBroadcast(CallkitIncomingBroadcastReceiver.getIntent(context, action, Bundle(bundle)))
+    }
 
     companion object {
         private const val TAG = "CallkitConnection"
@@ -52,7 +56,8 @@ class CallkitConnection(
 
         fun find(callId: String): CallkitConnection? = ownership.owner(callId) as? CallkitConnection
 
-        fun register(callId: String, conn: CallkitConnection): Boolean = ownership.activate(callId, conn)
+        fun register(callId: String, sessionKey: String?, conn: CallkitConnection): Boolean =
+            ownership.activate(callId, sessionKey, conn)
 
         fun claimOutgoing(callId: String): Boolean = ownership.claimOutgoing(callId)
 
@@ -61,6 +66,15 @@ class CallkitConnection(
         fun cancelOutgoing(callId: String) = ownership.cancelOutgoing(callId)
 
         fun unregister(callId: String, conn: CallkitConnection) = ownership.finish(callId, conn)
+
+        fun drive(callId: String, sessionKey: String?, context: Context, action: String): Boolean? {
+            if (ownership.owner(callId) == null) return null
+            var applied = false
+            val matched = ownership.dispatch(callId, sessionKey) { owner ->
+                applied = (owner as CallkitConnection).driveFromOwner(context, action)
+            }
+            return matched && applied
+        }
 
         /** For testing / cleanup — release all refs (Connection objects already destroyed by OS). */
         fun clearAll() {
@@ -74,7 +88,7 @@ class CallkitConnection(
         connectionProperties = PROPERTY_SELF_MANAGED
         audioModeIsVoip = true
         connectionCapabilities = CAPABILITY_MUTE or CAPABILITY_SUPPORT_HOLD
-        register(callId, this)
+        register(callId, historySession, this)
         Log.d(TAG, "Connection created id=$callId active=${activeCount()}")
     }
 
@@ -89,30 +103,26 @@ class CallkitConnection(
 
     override fun onAnswer() {
         super.onAnswer()
-        recordHistory("accepted")
         Log.d(TAG, "onAnswer id=$callId")
-        setActive()
+        eventRouter.fromTelecom(CallkitConstants.ACTION_CALL_ACCEPT)
     }
 
     override fun onReject() {
         super.onReject()
-        recordHistory("ended", "declined")
         Log.d(TAG, "onReject id=$callId")
-        finishWithCause(DisconnectCause.REJECTED)
+        eventRouter.fromTelecom(CallkitConstants.ACTION_CALL_DECLINE)
     }
 
     override fun onDisconnect() {
         super.onDisconnect()
-        recordHistory("ended")
         Log.d(TAG, "onDisconnect id=$callId")
-        finishWithCause(DisconnectCause.LOCAL)
+        eventRouter.fromTelecom(CallkitConstants.ACTION_CALL_ENDED)
     }
 
     override fun onAbort() {
         super.onAbort()
-        recordHistory("ended", "failed")
         Log.d(TAG, "onAbort id=$callId")
-        finishWithCause(DisconnectCause.UNKNOWN)
+        eventRouter.fromTelecom(CallkitConstants.ACTION_CALL_ENDED)
     }
 
     override fun onHold() {
@@ -140,6 +150,18 @@ class CallkitConnection(
     // -------------------------------------------------------------------------
     // App → Telecom driving helpers (invoked by the plugin's BroadcastReceiver)
     // -------------------------------------------------------------------------
+
+    private fun driveFromOwner(context: Context, action: String): Boolean {
+        if (!eventRouter.fromOwner(action)) return false
+        when (action) {
+            CallkitConstants.ACTION_CALL_ACCEPT -> markAccepted()
+            CallkitConstants.ACTION_CALL_DECLINE -> markDeclined(context)
+            CallkitConstants.ACTION_CALL_ENDED -> markEnded()
+            CallkitConstants.ACTION_CALL_TIMEOUT -> markMissed()
+            CallkitConstants.ACTION_CALL_CONNECTED -> markConnected()
+        }
+        return true
+    }
 
     /** Mark the call as answered — user accepted via app notification. */
     fun markAccepted() {

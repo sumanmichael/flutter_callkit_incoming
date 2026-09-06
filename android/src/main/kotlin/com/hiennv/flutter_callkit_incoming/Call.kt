@@ -87,6 +87,15 @@ data class Data(val args: Map<String, Any?>) {
     var headers: HashMap<String, Any?> =
         (args["headers"] ?: HashMap<String, Any?>()) as HashMap<String, Any?>
 
+    @JsonProperty("_callkitHistoryScope")
+    var historyScope: String? = args["_callkitHistoryScope"] as? String
+
+    @JsonProperty("_callkitHistorySession")
+    var historySession: String? = args["_callkitHistorySession"] as? String
+
+    @JsonProperty("_callkitHistoryDirection")
+    var historyDirection: String? = args["_callkitHistoryDirection"] as? String
+
     // Android params
 
     @JsonProperty("isCustomNotification")
@@ -333,6 +342,9 @@ data class Data(val args: Map<String, Any?>) {
             isFullScreen,
         )
         bundle.putString(CallkitConstants.EXTRA_CALLKIT_ACTION_FROM, from)
+        historyScope?.let { bundle.putString(PendingCallEvents.scopeExtra, it) }
+        historySession?.let { bundle.putString(PendingCallEvents.sessionExtra, it) }
+        historyDirection?.let { bundle.putString(PendingCallEvents.directionExtra, it) }
         return bundle
     }
 
@@ -441,6 +453,9 @@ data class Data(val args: Map<String, Any?>) {
                 true
             )
             data.from = bundle.getString(CallkitConstants.EXTRA_CALLKIT_ACTION_FROM, "")
+            data.historyScope = bundle.getString(PendingCallEvents.scopeExtra)
+            data.historySession = bundle.getString(PendingCallEvents.sessionExtra)
+            data.historyDirection = bundle.getString(PendingCallEvents.directionExtra)
             return data
         }
     }

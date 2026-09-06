@@ -18,7 +18,8 @@ internal fun supportsSelfManagedCallHistory(sdkInt: Int): Boolean = sdkInt >= 28
 
 internal class CallOwnership {
     private val outgoingClaims = mutableSetOf<String>()
-    private val active = mutableMapOf<String, Any>()
+    private data class OwnedCall(val sessionKey: String?, val owner: Any)
+    private val active = mutableMapOf<String, OwnedCall>()
 
     @Synchronized
     fun claimOutgoing(callId: String): Boolean =
@@ -33,18 +34,30 @@ internal class CallOwnership {
     }
 
     @Synchronized
-    fun activate(callId: String, owner: Any): Boolean {
+    fun activate(callId: String, sessionKey: String?, owner: Any): Boolean {
         outgoingClaims.remove(callId)
-        if (callId in active) return active[callId] === owner
-        active[callId] = owner
+        if (callId in active) return active[callId]?.owner === owner
+        active[callId] = OwnedCall(sessionKey, owner)
         return true
     }
 
     @Synchronized
-    fun owner(callId: String): Any? = active[callId]
+    fun owner(callId: String): Any? = active[callId]?.owner
 
     @Synchronized
-    fun finish(callId: String, owner: Any): Boolean = active.remove(callId, owner)
+    fun dispatch(callId: String, sessionKey: String?, action: (Any) -> Unit): Boolean {
+        val owned = active[callId] ?: return false
+        if (owned.sessionKey != sessionKey) return false
+        action(owned.owner)
+        return true
+    }
+
+    @Synchronized
+    fun finish(callId: String, owner: Any): Boolean {
+        if (active[callId]?.owner !== owner) return false
+        active.remove(callId)
+        return true
+    }
 
     @Synchronized
     fun clear() {
@@ -54,6 +67,42 @@ internal class CallOwnership {
 
     @Synchronized
     fun activeCount(): Int = active.size
+}
+
+internal class TelecomEventRouter(private val sendToOwner: (String) -> Unit) {
+    private val callbacksSent = mutableSetOf<String>()
+    private val ownerEvents = mutableSetOf<String>()
+
+    @Synchronized
+    fun fromTelecom(action: String): Boolean {
+        val key = eventKey(action)
+        if (key in callbacksSent || key in ownerEvents || isBlockedByTerminal(key)) return false
+        callbacksSent += key
+        sendToOwner(action)
+        return true
+    }
+
+    @Synchronized
+    fun fromOwner(action: String): Boolean {
+        val key = eventKey(action)
+        if (key in ownerEvents || isBlockedByTerminal(key)) return false
+        ownerEvents += key
+        return true
+    }
+
+    private fun isBlockedByTerminal(key: String): Boolean =
+        key != TERMINAL && (TERMINAL in callbacksSent || TERMINAL in ownerEvents)
+
+    private fun eventKey(action: String): String = when (action) {
+        CallkitConstants.ACTION_CALL_DECLINE,
+        CallkitConstants.ACTION_CALL_ENDED,
+        CallkitConstants.ACTION_CALL_TIMEOUT -> TERMINAL
+        else -> action
+    }
+
+    private companion object {
+        const val TERMINAL = "terminal"
+    }
 }
 
 @RequiresApi(Build.VERSION_CODES.M)
