@@ -8,6 +8,13 @@ import org.junit.Test
 
 class TelecomHistoryTest {
     @Test
+    fun transactionalTelecomStartsAtAndroid361() {
+        assertFalse(supportsTransactionalTelecom(null))
+        assertFalse(supportsTransactionalTelecom(3600000))
+        assertTrue(supportsTransactionalTelecom(3600001))
+    }
+
+    @Test
     fun historyExtraStartsAtApi28() {
         assertFalse(supportsSelfManagedCallHistory(24))
         assertFalse(supportsSelfManagedCallHistory(26))
@@ -114,4 +121,5 @@ class TelecomHistoryTest {
         assertTrue(router.fromOwner(CallkitConstants.ACTION_CALL_ENDED))
         assertFalse(router.fromOwner(CallkitConstants.ACTION_CALL_ENDED))
     }
+
 }

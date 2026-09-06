@@ -84,13 +84,28 @@ private data class StoredCall(
     val sessionKey: String,
     val direction: String,
     val remote: String?,
+    var androidCallControlId: String? = null,
     val facts: MutableMap<String, StoredFact> = linkedMapOf(),
 )
 private data class PendingEvent(
     val factClass: String,
     var delivered: Boolean,
-    val value: Map<String, Any?>,
+    var value: Map<String, Any?>,
 )
+
+internal data class CallbackCall(
+    val generation: String,
+    val callId: String,
+    val direction: String,
+    val remote: String?,
+)
+
+internal data class CallbackResolution(
+    val status: Status,
+    val call: CallbackCall? = null,
+) {
+    enum class Status { READY, MISSING, UNKNOWN, EXPIRED, STALE_SCOPE }
+}
 
 internal class PendingCallEventsStore(
     private val file: EventFile,
@@ -173,7 +188,7 @@ internal class PendingCallEventsStore(
         ).also {
             calls[ledgerKey(generation, callId)] = it
         }
-        val factClass = if (kind == "started" || kind == "incoming") "start" else if (kind == "ended") "terminal" else kind
+        val factClass = factClass(kind)
         val old = call.facts[factClass]
         if (old != null) {
             if (factClass == "terminal" || at >= old.at) return
@@ -191,6 +206,56 @@ internal class PendingCallEventsStore(
         events += PendingEvent(factClass, false, event(call, kind, at, resolvedOutcome))
         prune()
         persist()
+    }
+
+    fun attachCallControl(sessionKey: String, callControlId: String): Boolean {
+        val normalized = normalizedUuid(callControlId) ?: return false
+        val call = calls.values.singleOrNull { it.sessionKey == sessionKey } ?: return false
+        if (calls.values.any { it !== call && it.androidCallControlId == normalized }) return false
+        if (call.androidCallControlId != null && call.androidCallControlId != normalized) return false
+        if (call.androidCallControlId == normalized) return true
+        val existingEvents = events.toList()
+        val oldValues = existingEvents.map { it to it.value }
+        call.androidCallControlId = normalized
+        val matching = events.filter {
+            it.value["generation"] == call.generation && it.value["call_key"] == callKey(call.callId)
+        }
+        matching.filterNot { it.delivered }.forEach { pending ->
+            pending.value = LinkedHashMap(pending.value).apply {
+                put("android_call_control_id", normalized)
+            }
+        }
+        if (matching.isNotEmpty() && matching.all { it.delivered }) {
+            val latest = call.facts.values.maxByOrNull { it.at }
+            if (latest != null) {
+                events += PendingEvent(
+                    factClass(latest.kind),
+                    false,
+                    event(call, latest.kind, latest.at, latest.outcome),
+                )
+            }
+        }
+        try {
+            persist()
+        } catch (error: Exception) {
+            call.androidCallControlId = null
+            events.removeAll { candidate -> existingEvents.none { it === candidate } }
+            oldValues.forEach { (pending, value) -> pending.value = value }
+            throw error
+        }
+        return true
+    }
+
+    fun resolveCallback(callControlId: String?): CallbackResolution {
+        val normalized = callControlId?.let(::normalizedUuid)
+            ?: return CallbackResolution(CallbackResolution.Status.MISSING)
+        val call = calls.values.singleOrNull { it.androidCallControlId == normalized }
+            ?: return CallbackResolution(CallbackResolution.Status.UNKNOWN)
+        val lastFactAt = call.facts.values.maxOfOrNull { it.at } ?: return CallbackResolution(CallbackResolution.Status.UNKNOWN)
+        val details = CallbackCall(call.generation, call.callId, call.direction, call.remote)
+        if (lastFactAt < now() - retentionMillis) return CallbackResolution(CallbackResolution.Status.EXPIRED, details)
+        if (call.generation != currentScope) return CallbackResolution(CallbackResolution.Status.STALE_SCOPE, details)
+        return CallbackResolution(CallbackResolution.Status.READY, details)
     }
 
     fun pending(generation: String): List<Map<String, Any?>> {
@@ -257,7 +322,7 @@ internal class PendingCallEventsStore(
         "native_id" to call.callId,
         "provider_leg_id" to null,
         "provider_session_id" to null,
-        "android_call_control_id" to null,
+        "android_call_control_id" to call.androidCallControlId,
         "outcome" to outcome,
     )
 
@@ -276,6 +341,7 @@ internal class PendingCallEventsStore(
                 .put("session_key", call.sessionKey)
                 .put("direction", call.direction)
                 .put("remote", call.remote)
+                .put("android_call_control_id", call.androidCallControlId)
             val facts = node.putObject("facts")
             call.facts.forEach { (name, fact) ->
                 val factNode = facts.putObject(name).put("kind", fact.kind).put("at", fact.at)
@@ -318,7 +384,11 @@ internal class PendingCallEventsStore(
                         ?: "legacy:${node.required("generation").asText()}:${node.required("call_id").asText()}",
                     node.required("direction").asText(),
                     node.required("remote").takeUnless(JsonNode::isNull)?.asText(),
+                    node.get("android_call_control_id")?.takeUnless(JsonNode::isNull)?.asText(),
                 )
+                if (call.androidCallControlId != null && normalizedUuid(call.androidCallControlId!!) == null) {
+                    throw HistoryStoreException("history_corrupt")
+                }
                 node.required("facts").fields().forEach { (name, fact) ->
                     call.facts[name] = StoredFact(
                         fact.required("kind").asText(),
@@ -337,8 +407,14 @@ internal class PendingCallEventsStore(
                 val call = calls[ledgerKey(value["generation"] as String, value["native_id"] as String)]
                     ?: throw HistoryStoreException("history_corrupt")
                 if (value["call_key"] != callKey(call.callId)) throw HistoryStoreException("history_corrupt")
+                val eventCallControlId = value["android_call_control_id"] as String?
+                if (eventCallControlId != null && eventCallControlId != call.androidCallControlId) {
+                    throw HistoryStoreException("history_corrupt")
+                }
                 events += PendingEvent(node.required("fact_class").asText(), node.path("delivered").asBoolean(false), value)
             }
+            val callControlIds = calls.values.mapNotNull { it.androidCallControlId }
+            if (callControlIds.size != callControlIds.distinct().size) throw HistoryStoreException("history_corrupt")
         } catch (error: HistoryStoreException) {
             throw error
         } catch (error: Exception) {
@@ -378,7 +454,6 @@ internal class PendingCallEventsStore(
             event.path("kind").asText() !in kinds ||
             event.path("direction").asText() !in directions ||
             nullableEventStrings.any { !event.path(it).isNull && !event.path(it).isTextual } ||
-            alwaysNullEventFields.any { !event.path(it).isNull } ||
             (!event.path("outcome").isNull && event.path("outcome").asText() !in outcomes)
         ) throw HistoryStoreException("history_corrupt")
     }
@@ -393,11 +468,16 @@ internal class PendingCallEventsStore(
         private val directions = setOf("inbound", "outbound")
         private val outcomes = setOf(null, "answered", "declined", "missed", "failed", "interrupted", "unknown")
         private fun callKey(callId: String) = "android:$callId"
+        private fun factClass(kind: String) = if (kind == "started" || kind == "incoming") "start" else if (kind == "ended") "terminal" else kind
         private fun ledgerKey(generation: String, callId: String) = "$generation\u0000$callId"
         private val requiredEventStrings = setOf("event_id", "generation", "call_key", "kind", "direction", "at", "native_id")
-        private val nullableEventStrings = setOf("remote", "sdk_id", "provider_leg_id", "provider_session_id", "outcome")
-        private val alwaysNullEventFields = setOf("android_call_control_id")
-        private val eventFields = requiredEventStrings + nullableEventStrings + alwaysNullEventFields + "version"
+        private val nullableEventStrings = setOf("remote", "sdk_id", "provider_leg_id", "provider_session_id", "android_call_control_id", "outcome")
+        private val eventFields = requiredEventStrings + nullableEventStrings + "version"
+        private fun normalizedUuid(value: String): String? = try {
+            UUID.fromString(value).toString()
+        } catch (_: Exception) {
+            null
+        }
         private val timeFormat = object : ThreadLocal<SimpleDateFormat>() {
             override fun initialValue() = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.US).apply {
                 timeZone = TimeZone.getTimeZone("UTC")
@@ -463,6 +543,18 @@ internal object PendingCallEvents {
             try {
                 if (store == null && context != null) initializeNow(context.applicationContext)
                 store?.record(callId, scope, kind, direction, remote, outcome, observedAt, sessionKey)
+            } catch (_: Exception) {
+                // Calls must continue when protected history storage is unavailable.
+            }
+        }
+    }
+
+    fun attachCallControl(context: Context, sessionKey: String, callControlId: String) {
+        val applicationContext = context.applicationContext
+        executor.execute {
+            try {
+                initializeNow(applicationContext)
+                store?.attachCallControl(sessionKey, callControlId)
             } catch (_: Exception) {
                 // Calls must continue when protected history storage is unavailable.
             }

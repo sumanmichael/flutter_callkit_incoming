@@ -69,6 +69,90 @@ class PendingCallEventsTest {
     }
 
     @Test
+    fun callControlIdPersistsWithOriginalScopeAndDestination() {
+        val file = TestEventFile(temporaryFolder.newFile())
+        val first = store(file)
+        first.setScope("scope-a")
+        first.recordStart(
+            "call-a",
+            "session-a",
+            first.scopeForStart(),
+            "started",
+            "outbound",
+            "+12025550119",
+        )
+        first.setScope("scope-b")
+
+        assertTrue(first.attachCallControl("session-a", "00000000-0000-0000-0000-000000000001"))
+        val event = first.pending("scope-a").single()
+        assertEquals("00000000-0000-0000-0000-000000000001", event["android_call_control_id"])
+
+        val resolved = store(file).resolveCallback("00000000-0000-0000-0000-000000000001")
+        assertEquals(CallbackResolution.Status.STALE_SCOPE, resolved.status)
+        assertEquals("scope-a", resolved.call?.generation)
+        assertEquals("+12025550119", resolved.call?.remote)
+    }
+
+    @Test
+    fun deliveredStartStaysImmutableAndCallControlIdGetsReplayableEvent() {
+        val store = store()
+        store.setScope("scope-a")
+        store.recordStart("call-a", "session-a", store.scopeForStart(), "incoming", "inbound", "+12025550119")
+        val delivered = store.pending("scope-a").single()
+
+        assertTrue(store.attachCallControl("session-a", "00000000-0000-0000-0000-000000000001"))
+
+        val replay = store.pending("scope-a")
+        assertEquals(2, replay.size)
+        assertEquals(null, delivered["android_call_control_id"])
+        assertEquals(delivered, replay.first())
+        assertEquals("00000000-0000-0000-0000-000000000001", replay.last()["android_call_control_id"])
+    }
+
+    @Test
+    fun failedCallControlWriteDoesNotExposeId() {
+        val file = FailingEventFile(TestEventFile(temporaryFolder.newFile()))
+        val store = store(file)
+        store.setScope("scope-a")
+        store.recordStart("call-a", "session-a", store.scopeForStart(), "incoming", "inbound", "+12025550119")
+        file.failWrites = true
+
+        assertHistoryFailure("history_unavailable") {
+            store.attachCallControl("session-a", "00000000-0000-0000-0000-000000000001")
+        }
+        file.failWrites = false
+        assertEquals(null, store.pending("scope-a").single()["android_call_control_id"])
+    }
+
+    @Test
+    fun resolvesWarmAndColdCallbacksOnlyInCurrentScope() {
+        val file = TestEventFile(temporaryFolder.newFile())
+        val first = store(file)
+        first.setScope("scope-a")
+        first.recordStart("call-a", "session-a", first.scopeForStart(), "incoming", "inbound", "+12025550119")
+        first.attachCallControl("session-a", "00000000-0000-0000-0000-000000000001")
+
+        assertEquals(CallbackResolution.Status.READY, first.resolveCallback("00000000-0000-0000-0000-000000000001").status)
+        assertEquals(CallbackResolution.Status.READY, store(file).resolveCallback("00000000-0000-0000-0000-000000000001").status)
+        assertEquals(CallbackResolution.Status.MISSING, first.resolveCallback(null).status)
+        assertEquals(CallbackResolution.Status.UNKNOWN, first.resolveCallback("00000000-0000-0000-0000-000000000002").status)
+    }
+
+    @Test
+    fun rejectsExpiredCallControlId() {
+        val store = store()
+        store.setScope("scope-a")
+        store.recordStart("call-a", "session-a", store.scopeForStart(), "incoming", "inbound", "+12025550119")
+        store.attachCallControl("session-a", "00000000-0000-0000-0000-000000000001")
+        now += 7L * 24 * 60 * 60 * 1000 + 1
+
+        assertEquals(
+            CallbackResolution.Status.EXPIRED,
+            store.resolveCallback("00000000-0000-0000-0000-000000000001").status,
+        )
+    }
+
+    @Test
     fun ackRemovesOnlyDeliveredIdsAndLeavesLaterFacts() {
         val store = store()
         store.setScope("scope-a")

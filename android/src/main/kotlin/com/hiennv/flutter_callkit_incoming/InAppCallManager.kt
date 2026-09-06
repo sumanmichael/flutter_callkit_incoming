@@ -118,9 +118,14 @@ class InAppCallManager(private val context: Context) {
 
         return try {
             val telecomManager = context.getSystemService(Context.TELECOM_SERVICE) as TelecomManager
+            val capabilities = if (usesTransactionalTelecom()) {
+                PhoneAccount.CAPABILITY_SUPPORTS_TRANSACTIONAL_OPERATIONS
+            } else {
+                PhoneAccount.CAPABILITY_SELF_MANAGED
+            }
             val builder = PhoneAccount.builder(getPhoneAccountHandle(), "VSP Phone")
-                .setCapabilities(PhoneAccount.CAPABILITY_SELF_MANAGED)
-            if (supportsSelfManagedCallHistory(Build.VERSION.SDK_INT)) {
+                .setCapabilities(capabilities)
+            if (!usesTransactionalTelecom() && supportsSelfManagedCallHistory(Build.VERSION.SDK_INT)) {
                 builder.setExtras(Bundle().apply {
                     putBoolean(PhoneAccount.EXTRA_LOG_SELF_MANAGED_CALLS, true)
                 })

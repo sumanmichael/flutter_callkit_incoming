@@ -115,6 +115,10 @@ class CallkitIncomingBroadcastReceiver : BroadcastReceiver() {
     @SuppressLint("MissingPermission")
     private fun registerTelecomIncomingCall(context: Context, data: Bundle) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+        if (usesTransactionalTelecom()) {
+            ModernCallManager.add(context, data)
+            return
+        }
         val parsed = try {
             Data.fromBundle(data)
         } catch (e: Exception) {
@@ -122,13 +126,13 @@ class CallkitIncomingBroadcastReceiver : BroadcastReceiver() {
         } ?: return
         if (parsed.id.isEmpty()) return
         if (CallkitConnection.find(parsed.id) != null) {
-            Log.d(TAG, "Telecom call already registered id=${parsed.id} — skip")
+            Log.d(TAG, "Telecom call already registered id=${parsed.id} - skip")
             return
         }
         if (ContextCompat.checkSelfPermission(context, Manifest.permission.MANAGE_OWN_CALLS)
             != PackageManager.PERMISSION_GRANTED
         ) {
-            Log.w(TAG, "MANAGE_OWN_CALLS not granted — Telecom incoming skipped")
+            Log.w(TAG, "MANAGE_OWN_CALLS not granted - Telecom incoming skipped")
             return
         }
         val telecom = context.getSystemService(Context.TELECOM_SERVICE) as? TelecomManager ?: return
@@ -160,6 +164,14 @@ class CallkitIncomingBroadcastReceiver : BroadcastReceiver() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return null
         val callId = data.getString(CallkitConstants.EXTRA_CALLKIT_ID, "")
         if (callId.isEmpty()) return null
+        if (usesTransactionalTelecom()) {
+            return ModernCallManager.drive(
+                callId,
+                data.getString(PendingCallEvents.sessionExtra),
+                action,
+                outcome,
+            )
+        }
         return CallkitConnection.drive(
             callId,
             data.getString(PendingCallEvents.sessionExtra),
@@ -328,7 +340,11 @@ class CallkitIncomingBroadcastReceiver : BroadcastReceiver() {
 
     private fun registerTelecomOutgoingCall(context: Context, data: Bundle) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
-        InAppCallManager(context.applicationContext).placeOutgoingCall(data)
+        if (usesTransactionalTelecom()) {
+            ModernCallManager.add(context, data)
+        } else {
+            InAppCallManager(context.applicationContext).placeOutgoingCall(data)
+        }
     }
 
     private fun captureFact(context: Context, data: Bundle, kind: String, outcome: String? = null) {
