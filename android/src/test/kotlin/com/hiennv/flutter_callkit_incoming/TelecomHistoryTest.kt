@@ -115,13 +115,36 @@ class TelecomHistoryTest {
     }
 
     @Test
-    fun modernLifecycleCallbacksRouteThroughOwnerExactlyOnce() {
+    fun modernActivationWaitsForSipConnectedBeforeCompleting() {
         val sent = mutableListOf<String>()
         val lifecycle = ModernLifecycleRouter { action, _ -> sent += action }
+        val activation = ModernActivationRequests()
+        val completions = mutableListOf<Boolean>()
 
+        assertFalse(activation.request(completions::add))
+        assertTrue(sent.isEmpty())
+        assertTrue(activation.sipConnected())
+        assertTrue(completions.isEmpty())
+
+        val connected = lifecycle.fromOwner(CallkitConstants.ACTION_CALL_CONNECTED)
+        assertTrue(connected.accepted)
+        assertFalse(connected.originatedInTelecom)
+        activation.complete(true)
+
+        assertEquals(listOf(true), completions)
+        assertTrue(sent.isEmpty())
+        assertFalse(activation.request(completions::add))
+        assertEquals(listOf(true, true), completions)
+        activation.complete(true)
+        assertEquals(listOf(true, true), completions)
+    }
+
+    @Test
+    fun modernAnswerAndEndCallbacksRouteThroughOwnerExactlyOnce() {
+        val sent = mutableListOf<String>()
+        val lifecycle = ModernLifecycleRouter { action, _ -> sent += action }
         val actions = listOf(
             CallkitConstants.ACTION_CALL_ACCEPT,
-            CallkitConstants.ACTION_CALL_CONNECTED,
             CallkitConstants.ACTION_CALL_ENDED,
         )
         actions.forEach { action ->

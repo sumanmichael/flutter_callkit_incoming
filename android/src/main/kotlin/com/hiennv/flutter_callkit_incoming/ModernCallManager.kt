@@ -73,6 +73,54 @@ internal class ModernLifecycleRouter(sendToOwner: (String, String?) -> Unit) {
     }
 }
 
+internal class ModernActivationRequests {
+    private var sipConnected = false
+    private var setActiveInFlight = false
+    private var telecomActive = false
+    private val completions = mutableListOf<(Boolean) -> Unit>()
+
+    @Synchronized
+    fun request(completion: (Boolean) -> Unit): Boolean {
+        if (telecomActive) {
+            completion(true)
+            return false
+        }
+        completions += completion
+        return claimSetActive()
+    }
+
+    @Synchronized
+    fun sipConnected(): Boolean {
+        sipConnected = true
+        return claimSetActive()
+    }
+
+    @Synchronized
+    fun complete(success: Boolean) {
+        setActiveInFlight = false
+        telecomActive = success
+        val pending = completions.toList()
+        completions.clear()
+        pending.forEach { it(success) }
+    }
+
+    @Synchronized
+    fun cancel() {
+        sipConnected = false
+        setActiveInFlight = false
+        telecomActive = false
+        val pending = completions.toList()
+        completions.clear()
+        pending.forEach { it(false) }
+    }
+
+    private fun claimSetActive(): Boolean {
+        if (!sipConnected || telecomActive || setActiveInFlight) return false
+        setActiveInFlight = true
+        return true
+    }
+}
+
 @SuppressLint("NewApi", "MissingPermission")
 internal object ModernCallManager {
     private val ownership = CallOwnership()
@@ -173,6 +221,7 @@ internal object ModernCallManager {
             outcome?.let { eventBundle.putString(CallkitConnection.EXTRA_HISTORY_OUTCOME, it) }
             context.sendBroadcast(CallkitIncomingBroadcastReceiver.getIntent(context, action, eventBundle))
         }
+        private val activation = ModernActivationRequests()
         private val pendingControlActions = mutableListOf<String>()
         @Volatile private var control: CallControl? = null
 
@@ -194,7 +243,10 @@ internal object ModernCallManager {
                     applyToControl(action)
                 }
             }
-            if (eventKey(action) == TERMINAL) finish(callId, this)
+            if (eventKey(action) == TERMINAL) {
+                activation.cancel()
+                finish(callId, this)
+            }
             return true
         }
 
@@ -207,7 +259,7 @@ internal object ModernCallManager {
         }
 
         override fun onSetActive(result: Consumer<Boolean>) {
-            result.accept(lifecycle.fromTelecom(CallkitConstants.ACTION_CALL_CONNECTED))
+            if (activation.request(result::accept)) setTelecomActive()
         }
 
         override fun onSetInactive(result: Consumer<Boolean>) = result.accept(true)
@@ -231,11 +283,26 @@ internal object ModernCallManager {
         private fun applyToControl(action: String) {
             when (action) {
                 CallkitConstants.ACTION_CALL_ACCEPT -> control?.answer(VideoProfile.STATE_AUDIO_ONLY, directExecutor, unitOutcome)
-                CallkitConstants.ACTION_CALL_CONNECTED -> control?.setActive(directExecutor, unitOutcome)
+                CallkitConstants.ACTION_CALL_CONNECTED -> if (activation.sipConnected()) setTelecomActive()
                 CallkitConstants.ACTION_CALL_DECLINE -> disconnect(DisconnectCause.REJECTED)
                 CallkitConstants.ACTION_CALL_TIMEOUT -> disconnect(DisconnectCause.MISSED)
                 CallkitConstants.ACTION_CALL_ENDED -> disconnect(DisconnectCause.LOCAL)
             }
+        }
+
+        private fun setTelecomActive() {
+            val activeControl = control
+            if (activeControl == null) {
+                activation.complete(false)
+                return
+            }
+            activeControl.setActive(
+                directExecutor,
+                object : OutcomeReceiver<Void, CallException> {
+                    override fun onResult(result: Void?) = activation.complete(true)
+                    override fun onError(error: CallException) = activation.complete(false)
+                },
+            )
         }
 
         private fun eventKey(action: String): String = when (action) {
