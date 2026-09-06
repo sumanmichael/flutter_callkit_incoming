@@ -182,6 +182,36 @@ class PendingCallEventsTest {
     }
 
     @Test
+    fun deliveredCallbackSurvivesExpiryAndReconstructionUntilExactAck() {
+        val file = TestEventFile(temporaryFolder.newFile())
+        val first = store(file)
+        first.setScope("scope-a")
+        val created = first.enqueueLegacyCallback("tel:202").request!!
+        assertEquals(created.requestId, first.pendingCallbacks("scope-a").single()["request_id"])
+
+        now += 10L * 60 * 1000 + 1
+        val cold = store(file)
+        assertEquals(created.requestId, cold.pendingCurrentScopeCallbacks().single()["request_id"])
+        cold.ackCallbacks("scope-a", listOf(created.requestId))
+        assertTrue(cold.pendingCurrentScopeCallbacks().isEmpty())
+    }
+
+    @Test
+    fun deliveredCallbackSurvivesCapacitySaturationAndReconstruction() {
+        val file = TestEventFile(temporaryFolder.newFile())
+        val first = store(file)
+        first.setScope("scope-a")
+        val delivered = first.enqueueLegacyCallback("tel:200").request!!
+        assertEquals(delivered.requestId, first.pendingCallbacks("scope-a").single()["request_id"])
+        for (extension in 201..208) {
+            first.enqueueLegacyCallback("tel:$extension")
+        }
+
+        val cold = store(file)
+        assertEquals(delivered.requestId, cold.pendingCurrentScopeCallbacks().single()["request_id"])
+    }
+
+    @Test
     fun modernIntentRequiresExactActionAndAndroid361() {
         assertFalse(acceptsModernCallback(null, 3600001))
         assertFalse(acceptsModernCallback(AndroidCallbackHandoff.ACTION_CALL_BACK, 3600000))

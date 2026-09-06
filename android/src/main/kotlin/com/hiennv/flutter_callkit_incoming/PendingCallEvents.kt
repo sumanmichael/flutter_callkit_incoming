@@ -132,6 +132,7 @@ internal data class PendingCallbackRequest(
 internal enum class CallbackRequestStatus {
     READY,
     DUPLICATE,
+    CAPACITY,
     MISSING,
     UNKNOWN,
     EXPIRED,
@@ -336,6 +337,15 @@ internal class PendingCallEventsStore(
 
     fun pendingCallbacks(generation: String): List<Map<String, Any?>> {
         requireKnownGeneration(generation)
+        return pendingCallbacksFor(generation)
+    }
+
+    fun pendingCurrentScopeCallbacks(): List<Map<String, Any?>> {
+        val generation = currentScope ?: return emptyList()
+        return pendingCallbacksFor(generation)
+    }
+
+    private fun pendingCallbacksFor(generation: String): List<Map<String, Any?>> {
         prune()
         val selected = callbackRequests.firstOrNull { it.generation == generation } ?: return emptyList()
         if (!selected.delivered) {
@@ -370,10 +380,12 @@ internal class PendingCallEventsStore(
         callbackRequests.singleOrNull { it.generation == generation && it.sourceKey == sourceKey }?.let {
             return CallbackRequestResult(CallbackRequestStatus.DUPLICATE, it)
         }
+        if (callbackRequests.size >= maxCallbackRequests) {
+            return CallbackRequestResult(CallbackRequestStatus.CAPACITY)
+        }
         val oldRequests = callbackRequests.toList()
         val request = PendingCallbackRequest(newId(), generation, sourceKey, destination, now())
         callbackRequests += request
-        while (callbackRequests.size > maxCallbackRequests) callbackRequests.removeAt(0)
         try {
             persist()
         } catch (error: Exception) {
@@ -589,9 +601,9 @@ internal class PendingCallEventsStore(
         events.removeAll { (it.value["generation"] to it.value["call_key"]) !in retained }
         while (events.size > maxEvents) events.removeAt(0)
         callbackRequests.removeAll {
-            it.createdAt < now() - callbackRequestRetentionMillis || tombstones.containsKey(it.generation)
+            !it.delivered &&
+                (it.createdAt < now() - callbackRequestRetentionMillis || tombstones.containsKey(it.generation))
         }
-        while (callbackRequests.size > maxCallbackRequests) callbackRequests.removeAt(0)
     }
 
     private fun requireKnownGeneration(generation: String) {
@@ -794,9 +806,12 @@ internal object PendingCallEvents {
             try {
                 availability.failureCode(failureCode)?.let { throw HistoryStoreException(it) }
                 val active = store ?: throw HistoryStoreException("history_unavailable")
-                val args = call.arguments as? Map<*, *> ?: throw HistoryStoreException("history_invalid_arguments")
-                val generation = args["generation"] as? String ?: throw HistoryStoreException("history_invalid_arguments")
-                val value: Any? = when (call.method) {
+                val value: Any? = if (call.method == "pendingCurrentScopeCallbacks") {
+                    active.pendingCurrentScopeCallbacks()
+                } else {
+                    val args = call.arguments as? Map<*, *> ?: throw HistoryStoreException("history_invalid_arguments")
+                    val generation = args["generation"] as? String ?: throw HistoryStoreException("history_invalid_arguments")
+                    when (call.method) {
                     "setScope" -> {
                         active.setScope(generation)
                         null
@@ -822,6 +837,7 @@ internal object PendingCallEvents {
                         null
                     }
                     else -> throw HistoryStoreException("history_invalid_arguments")
+                    }
                 }
                 reply { result.success(value) }
             } catch (error: HistoryStoreException) {
