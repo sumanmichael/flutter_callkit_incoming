@@ -69,16 +69,16 @@ internal class CallOwnership {
     fun activeCount(): Int = active.size
 }
 
-internal class TelecomEventRouter(private val sendToOwner: (String) -> Unit) {
+internal class TelecomEventRouter(private val sendToOwner: (String, String?) -> Unit) {
     private val callbacksSent = mutableSetOf<String>()
     private val ownerEvents = mutableSetOf<String>()
 
     @Synchronized
-    fun fromTelecom(action: String): Boolean {
+    fun fromTelecom(action: String, outcome: String? = null): Boolean {
         val key = eventKey(action)
         if (key in callbacksSent || key in ownerEvents || isBlockedByTerminal(key)) return false
         callbacksSent += key
-        sendToOwner(action)
+        sendToOwner(action, outcome)
         return true
     }
 

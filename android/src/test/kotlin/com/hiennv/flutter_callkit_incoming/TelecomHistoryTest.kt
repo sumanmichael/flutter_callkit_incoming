@@ -75,7 +75,7 @@ class TelecomHistoryTest {
     @Test
     fun telecomCallbackRoutesOnceThroughOwnerFlow() {
         val sent = mutableListOf<String>()
-        val router = TelecomEventRouter { sent += it }
+        val router = TelecomEventRouter { action, _ -> sent += action }
 
         assertTrue(router.fromTelecom(CallkitConstants.ACTION_CALL_ACCEPT))
         assertFalse(router.fromTelecom(CallkitConstants.ACTION_CALL_ACCEPT))
@@ -96,10 +96,22 @@ class TelecomHistoryTest {
     @Test
     fun ownerEventSuppressesLaterTelecomCallback() {
         val sent = mutableListOf<String>()
-        val router = TelecomEventRouter { sent += it }
+        val router = TelecomEventRouter { action, _ -> sent += action }
 
         assertTrue(router.fromOwner(CallkitConstants.ACTION_CALL_ENDED))
         assertFalse(router.fromTelecom(CallkitConstants.ACTION_CALL_ENDED))
         assertTrue(sent.isEmpty())
+    }
+
+    @Test
+    fun abortRoutesFailedEndExactlyOnce() {
+        val sent = mutableListOf<Pair<String, String?>>()
+        val router = TelecomEventRouter { action, outcome -> sent += action to outcome }
+
+        assertTrue(router.fromTelecom(CallkitConstants.ACTION_CALL_ENDED, "failed"))
+        assertFalse(router.fromTelecom(CallkitConstants.ACTION_CALL_ENDED, "failed"))
+        assertEquals(listOf(CallkitConstants.ACTION_CALL_ENDED to "failed"), sent)
+        assertTrue(router.fromOwner(CallkitConstants.ACTION_CALL_ENDED))
+        assertFalse(router.fromOwner(CallkitConstants.ACTION_CALL_ENDED))
     }
 }

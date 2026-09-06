@@ -42,8 +42,10 @@ class CallkitConnection(
     private val historySession = bundle.getString(PendingCallEvents.sessionExtra)
     private val historyDirection = bundle.getString(PendingCallEvents.directionExtra, "inbound")
     private val historyRemote = bundle.getString(CallkitConstants.EXTRA_CALLKIT_HANDLE, "")
-    private val eventRouter = TelecomEventRouter { action ->
-        context.sendBroadcast(CallkitIncomingBroadcastReceiver.getIntent(context, action, Bundle(bundle)))
+    private val eventRouter = TelecomEventRouter { action, outcome ->
+        val eventBundle = Bundle(bundle)
+        outcome?.let { eventBundle.putString(EXTRA_HISTORY_OUTCOME, it) }
+        context.sendBroadcast(CallkitIncomingBroadcastReceiver.getIntent(context, action, eventBundle))
     }
 
     companion object {
@@ -51,6 +53,7 @@ class CallkitConnection(
 
         /** Bundle key — pass the full call Data bundle through Telecom extras. */
         const val EXTRA_CALL_BUNDLE = "com.hiennv.flutter_callkit_incoming.CALL_BUNDLE"
+        const val EXTRA_HISTORY_OUTCOME = "com.hiennv.flutter_callkit_incoming.HISTORY_OUTCOME"
 
         private val ownership = CallOwnership()
 
@@ -122,7 +125,7 @@ class CallkitConnection(
     override fun onAbort() {
         super.onAbort()
         Log.d(TAG, "onAbort id=$callId")
-        eventRouter.fromTelecom(CallkitConstants.ACTION_CALL_ENDED)
+        eventRouter.fromTelecom(CallkitConstants.ACTION_CALL_ENDED, "failed")
     }
 
     override fun onHold() {

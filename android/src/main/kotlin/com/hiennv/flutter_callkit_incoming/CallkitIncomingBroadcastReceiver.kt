@@ -242,7 +242,12 @@ class CallkitIncomingBroadcastReceiver : BroadcastReceiver() {
             "${context.packageName}.${CallkitConstants.ACTION_CALL_ENDED}" -> {
                 try {
                     if (driveTelecomConnection(context, data, CallkitConstants.ACTION_CALL_ENDED) == false) return
-                    captureFact(context, data, "ended")
+                    captureFact(
+                        context,
+                        data,
+                        "ended",
+                        data.getString(CallkitConnection.EXTRA_HISTORY_OUTCOME),
+                    )
                     FlutterCallkitIncomingPlugin.notifyEventCallbacks(CallkitEventCallback.CallEvent.END, data)
                     // clear notification and stop service
                     getCallkitNotificationManager()?.clearIncomingNotification(data, false)
