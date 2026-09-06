@@ -139,6 +139,126 @@ class PendingCallEventsTest {
     }
 
     @Test
+    fun modernCallbackIsDurableDeduplicatedUntilExactAckAndRepeatableAfterAck() {
+        val file = TestEventFile(temporaryFolder.newFile())
+        val first = store(file)
+        first.setScope("scope-a")
+        first.recordStart("call-a", "session-a", first.scopeForStart(), "incoming", "inbound", "+12025550119")
+        first.attachCallControl("session-a", "00000000-0000-0000-0000-000000000001")
+
+        val created = first.enqueueModernCallback("00000000-0000-0000-0000-000000000001")
+        val duplicate = first.enqueueModernCallback("00000000-0000-0000-0000-000000000001")
+        assertEquals(CallbackRequestStatus.READY, created.status)
+        assertEquals(CallbackRequestStatus.DUPLICATE, duplicate.status)
+        assertEquals(created.request?.requestId, duplicate.request?.requestId)
+
+        val cold = store(file)
+        val pending = cold.pendingCallbacks("scope-a").single()
+        assertEquals(created.request?.requestId, pending["request_id"])
+        assertEquals("+12025550119", pending["destination"])
+        cold.ackCallbacks("scope-a", listOf("not-the-request"))
+        assertEquals(1, cold.pendingCallbacks("scope-a").size)
+        cold.ackCallbacks("scope-a", listOf(created.request!!.requestId))
+
+        val later = cold.enqueueModernCallback("00000000-0000-0000-0000-000000000001")
+        assertEquals(CallbackRequestStatus.READY, later.status)
+        assertNotEquals(created.request?.requestId, later.request?.requestId)
+    }
+
+    @Test
+    fun additionalCallbackWaitsBehindFirstUntilItsAck() {
+        val store = store()
+        store.setScope("scope-a")
+        store.recordStart("call-a", "session-a", store.scopeForStart(), "incoming", "inbound", "+12025550119")
+        store.recordStart("call-b", "session-b", store.scopeForStart(), "incoming", "inbound", "+12025550120")
+        store.attachCallControl("session-a", "00000000-0000-0000-0000-000000000001")
+        store.attachCallControl("session-b", "00000000-0000-0000-0000-000000000002")
+        val first = store.enqueueModernCallback("00000000-0000-0000-0000-000000000001").request!!
+        val second = store.enqueueModernCallback("00000000-0000-0000-0000-000000000002").request!!
+
+        assertEquals(first.requestId, store.pendingCallbacks("scope-a").single()["request_id"])
+        store.ackCallbacks("scope-a", listOf(first.requestId))
+        assertEquals(second.requestId, store.pendingCallbacks("scope-a").single()["request_id"])
+    }
+
+    @Test
+    fun modernIntentRequiresExactActionAndAndroid361() {
+        assertFalse(acceptsModernCallback(null, 3600001))
+        assertFalse(acceptsModernCallback(AndroidCallbackHandoff.ACTION_CALL_BACK, 3600000))
+        assertTrue(acceptsModernCallback(AndroidCallbackHandoff.ACTION_CALL_BACK, 3600001))
+    }
+
+    @Test
+    fun callbackRejectsMissingUnknownExpiredAndStaleScope() {
+        val store = store()
+        store.setScope("scope-a")
+        store.recordStart("call-a", "session-a", store.scopeForStart(), "incoming", "inbound", "+12025550119")
+        store.attachCallControl("session-a", "00000000-0000-0000-0000-000000000001")
+
+        assertEquals(CallbackRequestStatus.MISSING, store.enqueueModernCallback(null).status)
+        assertEquals(
+            CallbackRequestStatus.UNKNOWN,
+            store.enqueueModernCallback("00000000-0000-0000-0000-000000000002").status,
+        )
+        store.setScope("scope-b")
+        assertEquals(
+            CallbackRequestStatus.STALE_SCOPE,
+            store.enqueueModernCallback("00000000-0000-0000-0000-000000000001").status,
+        )
+        store.setScope("scope-a")
+        now += 7L * 24 * 60 * 60 * 1000 + 1
+        assertEquals(
+            CallbackRequestStatus.EXPIRED,
+            store.enqueueModernCallback("00000000-0000-0000-0000-000000000001").status,
+        )
+        assertTrue(store.pendingCallbacks("scope-a").isEmpty())
+    }
+
+    @Test
+    fun forgetDropsCallbackAndReprovisionCannotReceiveIt() {
+        val store = store()
+        store.setScope("scope-a")
+        store.recordStart("call-a", "session-a", store.scopeForStart(), "incoming", "inbound", "+12025550119")
+        store.attachCallControl("session-a", "00000000-0000-0000-0000-000000000001")
+        store.enqueueModernCallback("00000000-0000-0000-0000-000000000001")
+
+        store.clear("scope-a")
+        store.setScope("scope-b")
+
+        assertTrue(store.pendingCallbacks("scope-b").isEmpty())
+        assertEquals(
+            CallbackRequestStatus.UNKNOWN,
+            store.enqueueModernCallback("00000000-0000-0000-0000-000000000001").status,
+        )
+    }
+
+    @Test
+    fun legacyCallbackRequiresStrictTelOrSipDestination() {
+        assertEquals("+12025550119", legacyCallbackDestination("tel:+12025550119"))
+        assertEquals("202", legacyCallbackDestination("tel:202"))
+        assertEquals("sip:alice@example.com", legacyCallbackDestination("sip:alice@example.com"))
+        assertEquals(null, legacyCallbackDestination(null))
+        assertEquals(null, legacyCallbackDestination("https://example.com"))
+        assertEquals(null, legacyCallbackDestination("tel:"))
+        assertEquals(null, legacyCallbackDestination("tel:+12025550119?x=1"))
+        assertEquals(null, legacyCallbackDestination("sip:alice:secret@example.com"))
+    }
+
+    @Test
+    fun legacyCallbackUsesCurrentScopeAndSharesPendingContract() {
+        val store = store()
+        assertEquals(CallbackRequestStatus.STALE_SCOPE, store.enqueueLegacyCallback("tel:202").status)
+        store.setScope("scope-a")
+
+        val created = store.enqueueLegacyCallback("tel:202")
+        val duplicate = store.enqueueLegacyCallback("tel:202")
+
+        assertEquals(CallbackRequestStatus.READY, created.status)
+        assertEquals(CallbackRequestStatus.DUPLICATE, duplicate.status)
+        assertEquals("202", store.pendingCallbacks("scope-a").single()["destination"])
+    }
+
+    @Test
     fun rejectsExpiredCallControlId() {
         val store = store()
         store.setScope("scope-a")

@@ -1,5 +1,6 @@
 package com.hiennv.flutter_callkit_incoming
 
+import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -86,10 +87,7 @@ class CallkitConnectionService : ConnectionService() {
         connectionManagerPhoneAccount: PhoneAccountHandle?,
         request: ConnectionRequest?,
     ): Connection {
-        val callBundle = extractCallBundle(request?.extras) ?: run {
-            Log.w(TAG, "onCreateOutgoingConnection: missing call bundle")
-            return failed("Missing call data")
-        }
+        val callBundle = extractCallBundle(request?.extras) ?: return handoffLegacyCallback(request)
 
         val data = Data.fromBundle(callBundle)
         val callId = data.id
@@ -116,6 +114,19 @@ class CallkitConnectionService : ConnectionService() {
             setDialing()
         }
         return connection
+    }
+
+    private fun handoffLegacyCallback(request: ConnectionRequest?): Connection {
+        AndroidCallbackHandoff.handleLegacy(applicationContext, request?.address?.toString()) { status ->
+            AppUtils.getAppIntent(applicationContext)?.apply {
+                action = AndroidCallbackHandoff.ACTION_HANDOFF
+                putExtra(AndroidCallbackHandoff.EXTRA_RESULT, status)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }?.let { launch ->
+                runCatching { applicationContext.startActivity(launch) }
+            }
+        }
+        return failed("Call confirmation required")
     }
 
     override fun onCreateOutgoingConnectionFailed(

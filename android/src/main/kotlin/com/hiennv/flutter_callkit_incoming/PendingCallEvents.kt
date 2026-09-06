@@ -12,6 +12,7 @@ import com.fasterxml.jackson.databind.ObjectMapper
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
 import java.io.File
+import java.net.URI
 import java.security.KeyStore
 import java.security.SecureRandom
 import java.text.SimpleDateFormat
@@ -111,6 +112,38 @@ private data class PendingEvent(
     var value: Map<String, Any?>,
 )
 
+internal data class PendingCallbackRequest(
+    val requestId: String,
+    val generation: String,
+    val sourceKey: String,
+    val destination: String,
+    val createdAt: Long,
+    var delivered: Boolean = false,
+) {
+    fun value(): Map<String, Any?> = linkedMapOf(
+        "version" to 1,
+        "request_id" to requestId,
+        "generation" to generation,
+        "destination" to destination,
+        "created_at" to createdAt,
+    )
+}
+
+internal enum class CallbackRequestStatus {
+    READY,
+    DUPLICATE,
+    MISSING,
+    UNKNOWN,
+    EXPIRED,
+    STALE_SCOPE,
+    INVALID_DESTINATION,
+}
+
+internal data class CallbackRequestResult(
+    val status: CallbackRequestStatus,
+    val request: PendingCallbackRequest? = null,
+)
+
 internal data class CallbackCall(
     val generation: String,
     val callId: String,
@@ -137,6 +170,7 @@ internal class PendingCallEventsStore(
     private val tombstones = linkedMapOf<String, Long>()
     private val calls = linkedMapOf<String, StoredCall>()
     private val events = mutableListOf<PendingEvent>()
+    private val callbackRequests = mutableListOf<PendingCallbackRequest>()
 
     init {
         file.read()?.let { load(it) }
@@ -276,6 +310,80 @@ internal class PendingCallEventsStore(
         return CallbackResolution(CallbackResolution.Status.READY, details)
     }
 
+    fun enqueueModernCallback(callControlId: String?): CallbackRequestResult {
+        val resolution = resolveCallback(callControlId)
+        val status = when (resolution.status) {
+            CallbackResolution.Status.READY -> null
+            CallbackResolution.Status.MISSING -> CallbackRequestStatus.MISSING
+            CallbackResolution.Status.UNKNOWN -> CallbackRequestStatus.UNKNOWN
+            CallbackResolution.Status.EXPIRED -> CallbackRequestStatus.EXPIRED
+            CallbackResolution.Status.STALE_SCOPE -> CallbackRequestStatus.STALE_SCOPE
+        }
+        if (status != null) return CallbackRequestResult(status)
+        val call = requireNotNull(resolution.call)
+        val destination = callbackDestination(call.remote)
+            ?: return CallbackRequestResult(CallbackRequestStatus.INVALID_DESTINATION)
+        return enqueueCallback(call.generation, "modern:${normalizedUuid(callControlId!!)!!}", destination)
+    }
+
+    fun enqueueLegacyCallback(uri: String?): CallbackRequestResult {
+        val generation = scopeForStart()
+            ?: return CallbackRequestResult(CallbackRequestStatus.STALE_SCOPE)
+        val destination = legacyCallbackDestination(uri)
+            ?: return CallbackRequestResult(if (uri == null) CallbackRequestStatus.MISSING else CallbackRequestStatus.INVALID_DESTINATION)
+        return enqueueCallback(generation, "legacy:$destination", destination)
+    }
+
+    fun pendingCallbacks(generation: String): List<Map<String, Any?>> {
+        requireKnownGeneration(generation)
+        prune()
+        val selected = callbackRequests.firstOrNull { it.generation == generation } ?: return emptyList()
+        if (!selected.delivered) {
+            selected.delivered = true
+            try {
+                persist()
+            } catch (error: Exception) {
+                selected.delivered = false
+                throw error
+            }
+        }
+        return listOf(selected.value())
+    }
+
+    fun ackCallbacks(generation: String, requestIds: List<String>) {
+        requireKnownGeneration(generation)
+        val removed = callbackRequests.filter {
+            it.generation == generation && it.delivered && it.requestId in requestIds
+        }
+        callbackRequests.removeAll(removed.toSet())
+        try {
+            persist()
+        } catch (error: Exception) {
+            callbackRequests.addAll(removed)
+            callbackRequests.sortBy { it.createdAt }
+            throw error
+        }
+    }
+
+    private fun enqueueCallback(generation: String, sourceKey: String, destination: String): CallbackRequestResult {
+        prune()
+        callbackRequests.singleOrNull { it.generation == generation && it.sourceKey == sourceKey }?.let {
+            return CallbackRequestResult(CallbackRequestStatus.DUPLICATE, it)
+        }
+        val oldRequests = callbackRequests.toList()
+        val request = PendingCallbackRequest(newId(), generation, sourceKey, destination, now())
+        callbackRequests += request
+        while (callbackRequests.size > maxCallbackRequests) callbackRequests.removeAt(0)
+        try {
+            persist()
+        } catch (error: Exception) {
+            callbackRequests.clear()
+            callbackRequests.addAll(oldRequests)
+            throw error
+        }
+        return CallbackRequestResult(CallbackRequestStatus.READY, request)
+    }
+
     fun pending(generation: String): List<Map<String, Any?>> {
         requireKnownGeneration(generation)
         val selected = events.filter { it.value["generation"] == generation }
@@ -312,10 +420,12 @@ internal class PendingCallEventsStore(
         val oldTombstone = tombstones[generation]
         val oldCalls = calls.filterValues { it.generation == generation }
         val oldEvents = events.filter { it.value["generation"] == generation }
+        val oldCallbacks = callbackRequests.filter { it.generation == generation }
         tombstones[generation] = now()
         if (currentScope == generation) currentScope = null
         calls.entries.removeAll { it.value.generation == generation }
         events.removeAll(oldEvents.toSet())
+        callbackRequests.removeAll(oldCallbacks.toSet())
         try {
             persist()
         } catch (error: Exception) {
@@ -323,6 +433,7 @@ internal class PendingCallEventsStore(
             if (oldTombstone == null) tombstones.remove(generation) else tombstones[generation] = oldTombstone
             calls.putAll(oldCalls)
             events.addAll(oldEvents)
+            callbackRequests.addAll(oldCallbacks)
             throw error
         }
     }
@@ -372,6 +483,16 @@ internal class PendingCallEventsStore(
                 .put("fact_class", pending.factClass)
                 .put("delivered", pending.delivered)
             node.set<JsonNode>("event", mapper.valueToTree(pending.value))
+        }
+        val callbackArray = root.putArray("callback_requests")
+        callbackRequests.forEach { request ->
+            callbackArray.addObject()
+                .put("request_id", request.requestId)
+                .put("generation", request.generation)
+                .put("source_key", request.sourceKey)
+                .put("destination", request.destination)
+                .put("created_at", request.createdAt)
+                .put("delivered", request.delivered)
         }
         try {
             file.write(PendingCallEventsCrypto.encrypt(mapper.writeValueAsBytes(root), key, newNonce()))
@@ -431,8 +552,24 @@ internal class PendingCallEventsStore(
                 }
                 events += PendingEvent(node.required("fact_class").asText(), node.path("delivered").asBoolean(false), value)
             }
+            root.path("callback_requests").forEach { node ->
+                val request = PendingCallbackRequest(
+                    node.required("request_id").asText(),
+                    node.required("generation").asText(),
+                    node.required("source_key").asText(),
+                    node.required("destination").asText(),
+                    node.required("created_at").asLong(),
+                    node.path("delivered").asBoolean(false),
+                )
+                if (request.requestId.isBlank() || request.generation.isBlank() ||
+                    request.sourceKey.isBlank() || request.destination.isBlank()
+                ) throw HistoryStoreException("history_corrupt")
+                callbackRequests += request
+            }
             val callControlIds = calls.values.mapNotNull { it.androidCallControlId }
             if (callControlIds.size != callControlIds.distinct().size) throw HistoryStoreException("history_corrupt")
+            val requestIds = callbackRequests.map { it.requestId }
+            if (requestIds.size != requestIds.distinct().size) throw HistoryStoreException("history_corrupt")
         } catch (error: HistoryStoreException) {
             throw error
         } catch (error: Exception) {
@@ -451,12 +588,18 @@ internal class PendingCallEventsStore(
         val retained = calls.values.map { it.generation to callKey(it.callId) }.toSet()
         events.removeAll { (it.value["generation"] to it.value["call_key"]) !in retained }
         while (events.size > maxEvents) events.removeAt(0)
+        callbackRequests.removeAll {
+            it.createdAt < now() - callbackRequestRetentionMillis || tombstones.containsKey(it.generation)
+        }
+        while (callbackRequests.size > maxCallbackRequests) callbackRequests.removeAt(0)
     }
 
     private fun requireKnownGeneration(generation: String) {
         validateGeneration(generation)
         if (tombstones.containsKey(generation) ||
-            generation != currentScope && calls.values.none { it.generation == generation } && events.none { it.value["generation"] == generation }
+            generation != currentScope && calls.values.none { it.generation == generation } &&
+                events.none { it.value["generation"] == generation } &&
+                callbackRequests.none { it.generation == generation }
         ) throw HistoryStoreException("history_unknown_generation")
     }
 
@@ -481,6 +624,8 @@ internal class PendingCallEventsStore(
     companion object {
         private const val maxCalls = 500
         private const val maxEvents = maxCalls * 5
+        private const val maxCallbackRequests = 8
+        private const val callbackRequestRetentionMillis = 10L * 60 * 1000
         private const val retentionMillis = 7L * 24 * 60 * 60 * 1000
         private val kinds = setOf("started", "incoming", "accepted", "connected", "ended")
         private val directions = setOf("inbound", "outbound")
@@ -501,6 +646,35 @@ internal class PendingCallEventsStore(
                 timeZone = TimeZone.getTimeZone("UTC")
             }
         }
+    }
+}
+
+internal fun legacyCallbackDestination(value: String?): String? {
+    val raw = value?.trim().takeUnless { it.isNullOrEmpty() } ?: return null
+    val uri = try {
+        URI(raw)
+    } catch (_: Exception) {
+        return null
+    }
+    if (uri.rawQuery != null || uri.rawFragment != null) return null
+    val scheme = uri.scheme?.lowercase(Locale.US) ?: return null
+    val body = uri.rawSchemeSpecificPart ?: return null
+    return when (scheme) {
+        "tel" -> body.takeIf { it.matches(Regex("\\+?[0-9]{2,32}")) }
+        "sip" -> body.takeIf {
+            it.matches(Regex("[A-Za-z0-9_.!~*'()+-]{1,128}@[A-Za-z0-9.-]{1,253}")) &&
+                it.substringAfter('@').contains('.')
+        }?.let { "sip:$it" }
+        else -> null
+    }
+}
+
+private fun callbackDestination(value: String?): String? {
+    val raw = value?.trim().takeUnless { it.isNullOrEmpty() } ?: return null
+    return if (raw.startsWith("sip:", ignoreCase = true)) {
+        legacyCallbackDestination(raw)
+    } else {
+        legacyCallbackDestination("tel:$raw")
     }
 }
 
@@ -578,6 +752,43 @@ internal object PendingCallEvents {
         }
     }
 
+    fun enqueueModernCallback(
+        context: Context,
+        callControlId: String?,
+        completion: (String) -> Unit,
+    ) {
+        enqueueCallback(context, completion) { it.enqueueModernCallback(callControlId) }
+    }
+
+    fun enqueueLegacyCallback(
+        context: Context,
+        uri: String?,
+        completion: (String) -> Unit,
+    ) {
+        enqueueCallback(context, completion) { it.enqueueLegacyCallback(uri) }
+    }
+
+    private fun enqueueCallback(
+        context: Context,
+        completion: (String) -> Unit,
+        create: (PendingCallEventsStore) -> CallbackRequestResult,
+    ) {
+        val applicationContext = context.applicationContext
+        executor.execute {
+            val result = try {
+                initializeNow(applicationContext)
+                val active = store ?: throw HistoryStoreException(failureCode ?: "history_unavailable")
+                create(active)
+            } catch (_: Exception) {
+                CallbackRequestResult(CallbackRequestStatus.UNKNOWN)
+            }
+            if (result.status == CallbackRequestStatus.READY) {
+                FlutterCallkitIncomingPlugin.notifyPendingCallback()
+            }
+            reply { completion(result.status.name.lowercase(Locale.US)) }
+        }
+    }
+
     fun handle(call: MethodCall, result: MethodChannel.Result) {
         executor.execute {
             try {
@@ -591,11 +802,19 @@ internal object PendingCallEvents {
                         null
                     }
                     "pending" -> active.pending(generation)
+                    "pendingCallbacks" -> active.pendingCallbacks(generation)
                     "ack" -> {
                         val ids = (args["event_ids"] as? List<*>)?.map {
                             it as? String ?: throw HistoryStoreException("history_invalid_arguments")
                         } ?: throw HistoryStoreException("history_invalid_arguments")
                         active.ack(generation, ids)
+                        null
+                    }
+                    "ackCallbacks" -> {
+                        val ids = (args["request_ids"] as? List<*>)?.map {
+                            it as? String ?: throw HistoryStoreException("history_invalid_arguments")
+                        } ?: throw HistoryStoreException("history_invalid_arguments")
+                        active.ackCallbacks(generation, ids)
                         null
                     }
                     "clear" -> {
@@ -631,3 +850,39 @@ internal object PendingCallEvents {
         return generator.generateKey()
     }
 }
+
+object AndroidCallbackHandoff {
+    const val ACTION_CALL_BACK = "android.telecom.action.CALL_BACK"
+    const val ACTION_HANDOFF = "com.hiennv.flutter_callkit_incoming.CALLBACK_HANDOFF"
+    const val EXTRA_UUID = "android.telecom.extra.UUID"
+    const val EXTRA_RESULT = "com.hiennv.flutter_callkit_incoming.CALLBACK_RESULT"
+
+    @JvmStatic
+    fun handleModern(
+        context: Context,
+        action: String?,
+        callControlId: String?,
+        completion: (String) -> Unit,
+    ) {
+        if (!acceptsModernCallback(action, currentFullSdkInt())) {
+            completion("unsupported")
+            return
+        }
+        PendingCallEvents.enqueueModernCallback(context, callControlId, completion)
+    }
+
+    internal fun handleLegacy(
+        context: Context,
+        uri: String?,
+        completion: (String) -> Unit,
+    ) {
+        if (usesTransactionalTelecom()) {
+            completion("unsupported")
+            return
+        }
+        PendingCallEvents.enqueueLegacyCallback(context, uri, completion)
+    }
+}
+
+internal fun acceptsModernCallback(action: String?, fullSdkInt: Int?): Boolean =
+    action == AndroidCallbackHandoff.ACTION_CALL_BACK && supportsTransactionalTelecom(fullSdkInt)

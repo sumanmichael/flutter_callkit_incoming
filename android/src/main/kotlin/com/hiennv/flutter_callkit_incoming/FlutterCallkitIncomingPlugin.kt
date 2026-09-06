@@ -74,6 +74,14 @@ class FlutterCallkitIncomingPlugin : FlutterPlugin, MethodCallHandler, ActivityA
             }, 750)
         }
 
+        fun notifyPendingCallback() {
+            Handler(Looper.getMainLooper()).post {
+                historyChannels.values.forEach {
+                    it.invokeMethod("callbackAvailable", null)
+                }
+            }
+        }
+
         /**
          * Send event to Flutter UI if there are active handlers, otherwise send to background
          * executor if registered.
