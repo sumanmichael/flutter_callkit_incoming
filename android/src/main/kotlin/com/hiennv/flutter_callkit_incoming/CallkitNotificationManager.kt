@@ -15,6 +15,7 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.BroadcastReceiver
+import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.DialogInterface
 import android.content.Intent
@@ -1089,7 +1090,12 @@ class CallkitNotificationManager(
             val intent = Intent(Settings.ACTION_MANAGE_APP_USE_FULL_SCREEN_INTENT).apply {
                 data = Uri.fromParts("package", activity?.packageName, null)
             }
-            activity?.startActivity(intent)
+            try {
+                activity?.startActivity(intent)
+            } catch (_: ActivityNotFoundException) {
+                // Some devices do not expose this settings screen. Permission
+                // remains denied; incoming notification actions still work.
+            }
         }
     }
 
