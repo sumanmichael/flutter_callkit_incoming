@@ -112,3 +112,17 @@ fun getRawHandle(context: Context?, key: String): Int? {
     initInstance(context)
     return prefs?.getInt(key, 0)
 }
+
+// Missing means on, so a phone that never chose keeps logging calls.
+fun isSystemCallLogEnabled(context: Context?): Boolean {
+    if (context == null) return true
+    initInstance(context)
+    return prefs?.getBoolean("SYSTEM_CALL_LOG_ENABLED", true) ?: true
+}
+
+fun setSystemCallLogEnabled(context: Context?, enabled: Boolean) {
+    if (context == null) return
+    initInstance(context)
+    editor?.putBoolean("SYSTEM_CALL_LOG_ENABLED", enabled)
+    editor?.commit()
+}

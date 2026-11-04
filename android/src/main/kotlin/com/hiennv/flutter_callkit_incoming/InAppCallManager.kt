@@ -16,6 +16,15 @@ import androidx.core.content.ContextCompat
 
 internal fun supportsSelfManagedCallHistory(sdkInt: Int): Boolean = sdkInt >= 28
 
+// Null leaves the extra off: below API 28 it does not exist, and the
+// transactional path does not read it.
+internal fun selfManagedCallLogExtra(sdkInt: Int, transactional: Boolean, enabled: Boolean): Boolean? =
+    if (transactional || !supportsSelfManagedCallHistory(sdkInt)) null else enabled
+
+/** False where the setting cannot change anything, so an app can hide it. */
+internal fun systemCallLogSupported(sdkInt: Int, transactional: Boolean): Boolean =
+    selfManagedCallLogExtra(sdkInt, transactional, true) != null
+
 internal class CallOwnership {
     private val outgoingClaims = mutableSetOf<String>()
     private data class OwnedCall(val sessionKey: String?, val owner: Any)
@@ -111,6 +120,23 @@ class InAppCallManager(private val context: Context) {
     companion object {
         private const val ACCOUNT_ID = "flutter_callkit_incoming_in_app_call_account"
         private const val TAG = "InAppCallManager"
+
+        // Set when the call log setting changed under a live call; the last
+        // call's end registers the account again instead of the next start.
+        @Volatile
+        private var registrationPending = false
+
+        fun deferRegistration() {
+            registrationPending = true
+        }
+
+        fun registerIfPending(context: Context) {
+            if (!registrationPending) return
+            registrationPending = false
+            PendingCallEvents.reportPhoneAccountRegistration(
+                InAppCallManager(context.applicationContext).registerPhoneAccount(),
+            )
+        }
     }
 
     fun registerPhoneAccount(): Boolean {
@@ -125,9 +151,13 @@ class InAppCallManager(private val context: Context) {
             }
             val builder = PhoneAccount.builder(getPhoneAccountHandle(), "VSP Phone")
                 .setCapabilities(capabilities)
-            if (!usesTransactionalTelecom() && supportsSelfManagedCallHistory(Build.VERSION.SDK_INT)) {
+            selfManagedCallLogExtra(
+                Build.VERSION.SDK_INT,
+                usesTransactionalTelecom(),
+                isSystemCallLogEnabled(context),
+            )?.let { logCalls ->
                 builder.setExtras(Bundle().apply {
-                    putBoolean(PhoneAccount.EXTRA_LOG_SELF_MANAGED_CALLS, true)
+                    putBoolean(PhoneAccount.EXTRA_LOG_SELF_MANAGED_CALLS, logCalls)
                 })
             }
             telecomManager.registerPhoneAccount(builder.build())
@@ -155,6 +185,7 @@ class InAppCallManager(private val context: Context) {
                 ContextCompat.checkSelfPermission(context, Manifest.permission.MANAGE_OWN_CALLS) != PackageManager.PERMISSION_GRANTED
             ) {
                 CallkitConnection.cancelOutgoing(parsed.id)
+                Log.w(TAG, "Outgoing Telecom call skipped: account=${account != null}")
                 false
             } else {
                 val ownedExtras = Bundle().apply {
@@ -168,9 +199,14 @@ class InAppCallManager(private val context: Context) {
                 telecomManager.placeCall(Uri.fromParts("tel", parsed.handle, null), extras)
                 true
             }
-        } catch (_: Exception) {
+        } catch (error: Exception) {
             CallkitConnection.cancelOutgoing(parsed.id)
-            Log.w(TAG, "Outgoing Telecom call unavailable.")
+            // Digits masked: a Telecom message can carry the dialled number.
+            Log.w(
+                TAG,
+                "Outgoing Telecom call unavailable: ${error.javaClass.name}: " +
+                    "${error.message?.replace(Regex("\\d"), "#")}",
+            )
             false
         }
     }

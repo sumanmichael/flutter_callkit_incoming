@@ -237,6 +237,23 @@ class FlutterCallkitIncoming {
     return await _channel.invokeMethod("canUseFullScreenIntent");
   }
 
+  /// Only Android: whether [setSystemCallLogEnabled] can change anything on
+  /// this phone (API 28 up to, not including, Android 36.1). iOS: false.
+  static Future<bool> isSystemCallLogSupported() async {
+    return await _channel.invokeMethod("isSystemCallLogSupported") ?? false;
+  }
+
+  /// Only Android: whether calls are written to the system call log
+  /// (API 28 up to, not including, Android 36.1). Saved natively; default on.
+  /// True when the PhoneAccount was registered again with the new value.
+  /// False under a live call, where it applies when the last call ends, or
+  /// where [isSystemCallLogSupported] is false. iOS: use
+  /// IOSParams.includesCallsInRecents.
+  static Future<bool> setSystemCallLogEnabled(bool enabled) async {
+    return await _channel
+        .invokeMethod("setSystemCallLogEnabled", {'enabled': enabled});
+  }
+
   static CallEvent? _receiveCallEvent(dynamic data) {
     if (data is! Map) {
       return null;

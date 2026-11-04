@@ -275,6 +275,7 @@ class CallkitConnection(
             Log.w(TAG, "setDisconnected failed: ${e.message}")
         }
         unregister(callId, this)
+        if (activeCount() == 0) InAppCallManager.registerIfPending(context)
         try {
             destroy()
         } catch (e: Exception) {
